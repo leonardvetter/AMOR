@@ -1,0 +1,23 @@
+name: ncl
+channels:
+  - conda-forge
+  - pytorch # PyTorch's channel for better package resolution
+  - defaults
+dependencies:
+  - python=3.12 # this should be updated asa 3.13 is fully supported by torch (which does not seem to be the case of now)
+  - gymnasium
+  - pytorch=2.7.1 
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - seaborn
+  - jupyterlab
+  - ipykernel
+  - tqdm
+  - stable-baselines3
+  - torchvision
+  - pygame
+  - wandb
+  - scikit-learn
+  - einops
