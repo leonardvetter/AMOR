@@ -1,4 +1,4 @@
-name: multilayer_RBNO_env
+name: multilayer-RBNO_env
 channels:
   - conda-forge
   - pytorch # PyTorch's channel for better package resolution
@@ -18,4 +18,4 @@ dependencies:
   - torchvision
   - wandb
   - scikit-learn
-  - einops
+  - einopsß
