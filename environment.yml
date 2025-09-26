@@ -18,4 +18,8 @@ dependencies:
   - torchvision
   - wandb
   - scikit-learn
-  - einopsß
+  - einops
+  - fenics-dolfin
+  - jax
+  - jaxtyping
+  
