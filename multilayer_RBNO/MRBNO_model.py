@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 
+
 # ============= PCAReducer Class =============
 @dataclass
 class PCAConfig:
@@ -252,7 +253,7 @@ class MultiLayerReducedBasisResNet(nn.Module):
     Architecture:
     - Block 0: Uses input PCA basis for encoding, output basis for decoding
     - Blocks 1+: Use output PCA basis for both encoding and decoding
-    - Each block has a residual connection with learnable gate
+    - Each block has a residual connection with learnable scalar gate
     - Nonlinearity applied between blocks
     """
     def __init__(self, rb: PCAReducer, k_in: int, k_out: int,
@@ -267,7 +268,7 @@ class MultiLayerReducedBasisResNet(nn.Module):
         self.N, self.M = rb.shape_
         self.layers = layers
         
-        # First block: input basis -> output basis
+        # First block: input basis -> output basis (use_input_basis_for_encoder=True)
         self.block0 = ReducedBasisResNet(
             rb, k_in=k_in, k_out=k_out,
             hidden=hidden, depth=depth, dropout=dropout,
@@ -319,41 +320,10 @@ class MultiLayerReducedBasisResNet(nn.Module):
         
         return y
     
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Optional
-
-class ScalarGate(nn.Module):
-    """Learnable scalar multiplier for residual connection."""
-    def __init__(self, init: float = 0.01):  # Much smaller default
-        super().__init__()
-        self.alpha = nn.Parameter(torch.tensor(float(init), dtype=torch.float32))
-    
-    def forward(self, x):
-        return x * self.alpha
 
 
-class ResidualBlock(nn.Module):
-    """Standard residual block with pre-norm and scaled initialization."""
-    def __init__(self, d_model: int, dropout: float = 0.0):
-        super().__init__()
-        self.lin1 = nn.Linear(d_model, d_model)
-        self.lin2 = nn.Linear(d_model, d_model)
-        self.norm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
-        self.act = nn.GELU()
-        
-        # Initialize second linear layer with very small weights for stability
-        nn.init.xavier_uniform_(self.lin1.weight, gain=0.5)
-        nn.init.zeros_(self.lin2.weight)  # Start with zero contribution
-        nn.init.zeros_(self.lin2.bias)
-    
-    def forward(self, x):
-        y = self.lin2(self.act(self.lin1(self.norm(x))))
-        y = self.dropout(y)
-        return x + 0.1 * y  # Scale down residual contribution
+
+
 
 
 class ReducedBasisResNetV2(nn.Module):
@@ -421,8 +391,8 @@ class ReducedBasisResNetV2(nn.Module):
         
         # Output projection - initialize to near-identity transformation
         self.out_proj = nn.Linear(hidden, self.k_out)
-        nn.init.zeros_(self.out_proj.weight)  # Start with zeros
-        nn.init.zeros_(self.out_proj.bias)
+        nn.init.xavier_uniform_(self.out_proj.weight, gain=0.1)  # Start with zeros
+        nn.init.xavier_uniform_(self.out_proj.bias, gain=0.1)
         
         # Skip connection from input to output if dimensions match
         self.has_skip = (self.encoder_dim == self.k_out)
@@ -459,16 +429,16 @@ class ReducedBasisResNetV2(nn.Module):
         
         # Add skip connection if dimensions match
         if self.has_skip:
-            z_out = self.skip_scale * z + 0.1 * h_out
+            z_out = self.skip_scale * z + h_out
         else:
             # If dimensions don't match, we need to be more careful
             if self.encoder_dim < self.k_out:
                 # Pad zeros
                 z_padded = F.pad(z, (0, self.k_out - self.encoder_dim))
-                z_out = z_padded + 0.1 * h_out
+                z_out = z_padded + h_out
             else:
                 # Use only the network output
-                z_out = z[:, :self.k_out] + 0.1 * h_out
+                z_out = z[:, :self.k_out] + h_out
         
         # Decode back to function space
         y_flat = self.decode(z_out)
@@ -743,52 +713,4 @@ def test_pca_reconstruction(rb: PCAReducer, X, Y, k_in=50, k_out=50):
     print(f"    Explained variance: {rb.pca_out.explained_variance_ratio_[:k_out].sum():.2%}")
     print(f"  Baseline X->Y error: {np.mean((X - Y)**2):.4e}")
 
-
-# ============= Example Usage =============
-
-if __name__ == "__main__":
-    # Example usage
-    print("Example usage of MultiLayerReducedBasisResNet")
-    
-    # Create dummy data
-    num_samples = 1000
-    N = 64
-    X = np.random.randn(num_samples, N, N).astype(np.float32)
-    Y = np.random.randn(num_samples, N, N).astype(np.float32)
-    
-    # Fit PCA
-    rb = PCAReducer()
-    rb.fit(X[:800], Y[:800])  # Fit on training data only
-    
-    # Determine good k values
-    k_in, k_out = rb.k_from_cutoff(j_in=0.99, j_out=0.99)
-    print(f"k_in={k_in}, k_out={k_out} for 99% variance")
-    
-    # Test PCA reconstruction
-    test_pca_reconstruction(rb, X[:100], Y[:100], k_in=min(k_in, 50), k_out=min(k_out, 50))
-    
-    # Create model
-    model = MultiLayerReducedBasisResNet(
-        rb,
-        k_in=min(k_in, 50),
-        k_out=min(k_out, 50),
-        layers=3,
-        hidden=128,
-        depth=2,
-        dropout=0.1,
-        share_weights=False,
-        init_scale=0.1
-    )
-    
-    # Split data
-    train_frac = 0.7
-    split_idx = int(num_samples * train_frac)
-    X_train, Y_train = X[:split_idx], Y[:split_idx]
-    X_val, Y_val = X[split_idx:], Y[split_idx:]
-    
-    # Train
-    trained_model = simple_train(
-        model, X_train, Y_train, X_val, Y_val,
-        epochs=100, batch_size=32, lr=5e-4, weight_decay=1e-5
-    )
 
