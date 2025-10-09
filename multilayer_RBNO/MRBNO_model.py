@@ -678,8 +678,75 @@ def simple_train(model, X_train, Y_train, X_val, Y_val,
                   f"lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch})")
     
     print(f"\nBest validation loss: {best_val_loss:.4e} at epoch {best_epoch}")
-    return model, best_val_loss, best_epoch
+    return model
 
+def silent_train(model, X_train, Y_train, X_val, Y_val,
+                 epochs=50, batch_size=16, lr=1e-3, weight_decay=1e-4,
+                 scheduler_step=50, scheduler_gamma=0.8):
+    """Training loop without print statements."""
+    
+    # Convert numpy to torch if needed
+    if isinstance(X_train, np.ndarray): 
+        X_train = torch.from_numpy(X_train).float()
+    if isinstance(Y_train, np.ndarray): 
+        Y_train = torch.from_numpy(Y_train).float()
+    if isinstance(X_val, np.ndarray): 
+        X_val = torch.from_numpy(X_val).float()
+    if isinstance(Y_val, np.ndarray): 
+        Y_val = torch.from_numpy(Y_val).float()
+
+    # Ensure channel dimension
+    if X_train.ndim == 3: 
+        X_train = X_train.unsqueeze(1)
+    if Y_train.ndim == 3: 
+        Y_train = Y_train.unsqueeze(1)
+    if X_val.ndim == 3: 
+        X_val = X_val.unsqueeze(1)
+    if Y_val.ndim == 3: 
+        Y_val = Y_val.unsqueeze(1)
+
+    train_loader = DataLoader(TensorDataset(X_train, Y_train), batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(TensorDataset(X_val, Y_val), batch_size=batch_size)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else
+                          "mps" if torch.backends.mps.is_available() else "cpu")
+    model.to(device)
+    
+    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=scheduler_step, gamma=scheduler_gamma)
+    loss_fn = nn.MSELoss()
+    
+    best_val_loss = float('inf')
+
+    for epoch in range(1, epochs + 1):
+        # Training
+        model.train()
+        for xb, yb in train_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            opt.zero_grad()
+            pred = model(xb)
+            loss = loss_fn(pred, yb)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            opt.step()
+
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                pred = model(xb)
+                loss = loss_fn(pred, yb)
+                val_loss += loss.item() * xb.size(0)
+        val_loss /= len(val_loader.dataset)
+        
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+        
+        scheduler.step()
+    
+    return best_val_loss
 
 # ============= Diagnostic Functions =============
 
