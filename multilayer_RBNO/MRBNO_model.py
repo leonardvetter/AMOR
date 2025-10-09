@@ -678,7 +678,7 @@ def simple_train(model, X_train, Y_train, X_val, Y_val,
                   f"lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch})")
     
     print(f"\nBest validation loss: {best_val_loss:.4e} at epoch {best_epoch}")
-    return model
+    return model, best_val_loss, best_epoch
 
 
 # ============= Diagnostic Functions =============
