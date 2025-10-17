@@ -207,4 +207,4 @@ marimo/_lsp/
 __marimo__/
 
 # Large dataset files
-*.npz
+*.npzMiniconda3-latest-Linux-x86_64.sh
