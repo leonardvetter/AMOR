@@ -150,7 +150,7 @@ class ReducedBasisResNet(nn.Module):
     """
     def __init__(self, rb: PCAReducer, k_in: int, k_out: int, 
                  hidden: int = 256, depth: int = 4, dropout: float = 0.0,
-                 use_input_basis_for_encoder: bool = False):
+                 use_input_basis_for_encoder: bool = False,use_input_basis_for_decoder: bool = False):
         super().__init__()
         
         # Validate PCAReducer
@@ -186,9 +186,19 @@ class ReducedBasisResNet(nn.Module):
             enc_components = rb.pca_out.components_[:k_out, :].astype(np.float32)
             enc_mean = rb.pca_out.mean_.astype(np.float32)
         
-        # Always use output PCA for decoding
-        dec_components = rb.pca_out.components_[:k_out, :].astype(np.float32)
-        dec_mean = rb.pca_out.mean_.astype(np.float32)
+
+        # Setup encoder components
+        if use_input_basis_for_decoder:
+            # Use input PCA for encoding
+            self.decoder_dim = k_in
+            dec_components = rb.pca_in.components_[:k_in, :].astype(np.float32)
+            dec_mean = rb.pca_in.mean_.astype(np.float32)
+        else:
+            # Use output PCA for encoding
+            self.decoder_dim = k_out
+            dec_components = rb.pca_out.components_[:k_out, :].astype(np.float32)
+            dec_mean = rb.pca_out.mean_.astype(np.float32)
+        
         
         # Register as buffers
         self.register_buffer("enc_components_t", torch.from_numpy(enc_components.T))  # (D, encoder_dim)
@@ -199,7 +209,7 @@ class ReducedBasisResNet(nn.Module):
         # ResNet in coefficient space
         self.in_proj = nn.Linear(self.encoder_dim, hidden)
         self.blocks = nn.ModuleList([ResidualBlock(hidden, dropout) for _ in range(depth)])
-        self.out_proj = nn.Linear(hidden, self.k_out)
+        self.out_proj = nn.Linear(hidden, self.decoder_dim)
         
         self._init_weights()
     
@@ -267,14 +277,23 @@ class MultiLayerReducedBasisResNet(nn.Module):
         
         self.N, self.M = rb.shape_
         self.layers = layers
+
+        # zero block: input basis -> output basis (use_input_basis_for_encoder=True)
+        self.block0 = ReducedBasisResNet(
+            rb, k_in=k_in, k_out=k_out,
+            hidden=hidden, depth=depth, dropout=dropout,
+            use_input_basis_for_encoder=True,
+            use_input_basis_for_decoder=True
+        )
+        self.gate0 = ScalarGate(init=init_scale)
         
         # First block: input basis -> output basis (use_input_basis_for_encoder=True)
-        self.block0 = ReducedBasisResNet(
+        self.block1 = ReducedBasisResNet(
             rb, k_in=k_in, k_out=k_out,
             hidden=hidden, depth=depth, dropout=dropout,
             use_input_basis_for_encoder=True
         )
-        self.gate0 = ScalarGate(init=init_scale)
+        self.gate1 = ScalarGate(init=init_scale)
         
         # Subsequent blocks: output basis -> output basis
         if layers > 0:
@@ -310,8 +329,14 @@ class MultiLayerReducedBasisResNet(nn.Module):
         if x.ndim != 4 or x.shape[1] != 1:
             raise ValueError(f"Expected (B, 1, N, M), got {x.shape}")
         
-        # First block with input basis encoding
+
+        # Zero block with input basis encoding and decoding
         y = x + self.gate0(self.block0(x))
+        y = self.act(y)
+
+        #first block changes from input to output space
+        y = x + self.gate1(self.block1(x))
+        
         
         # Subsequent blocks with output basis encoding
         for block, gate in zip(self.blocks, self.gates):

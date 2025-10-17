@@ -87,7 +87,7 @@ class ReducedBasisResNetMultiChannel(nn.Module):
     
     def __init__(self, rb: PCAReducerMultiChannel, k_in: int, k_out: int, 
                  hidden: int = 256, depth: int = 4, dropout: float = 0.0,
-                 use_input_basis_for_encoder: bool = False):
+                 use_input_basis_for_encoder: bool = False,use_input_basis_for_decoder: bool = False):
         super().__init__()
         
         # Validate PCAReducer
@@ -112,7 +112,7 @@ class ReducedBasisResNetMultiChannel(nn.Module):
         self.use_input_basis = use_input_basis_for_encoder
         self.k_in = k_in
         self.k_out = k_out
-        
+
         # Setup encoder components
         if use_input_basis_for_encoder:
             self.encoder_dim = k_in
@@ -130,10 +130,15 @@ class ReducedBasisResNetMultiChannel(nn.Module):
             # Pad mean as well
             if enc_mean.shape[0] < self.D_in:
                 enc_mean = np.pad(enc_mean, (0, self.D_in - enc_mean.shape[0]), 'constant')
-        
-        # Always use output PCA for decoding
-        dec_components = rb.pca_out.components_[:k_out, :].astype(np.float32)
-        dec_mean = rb.pca_out.mean_.astype(np.float32)
+
+        if use_input_basis_for_decoder:
+            self.decoder_dim = k_in
+            dec_components = rb.pca_in.components_[:k_in, :].astype(np.float32)
+            dec_mean = rb.pca_in.mean_.astype(np.float32)
+        else:
+            self.decoder_dim = k_out
+            dec_components = rb.pca_out.components_[:k_out, :].astype(np.float32)
+            dec_mean = rb.pca_out.mean_.astype(np.float32)
         
         # Register as buffers
         self.register_buffer("enc_components_t", torch.from_numpy(enc_components.T))  # (D_in, encoder_dim)
@@ -144,7 +149,8 @@ class ReducedBasisResNetMultiChannel(nn.Module):
         # ResNet in coefficient space
         self.in_proj = nn.Linear(self.encoder_dim, hidden)
         self.blocks = nn.ModuleList([ResidualBlock(hidden, dropout) for _ in range(depth)])
-        self.out_proj = nn.Linear(hidden, self.k_out)
+        self.out_proj = nn.Linear(hidden, self.decoder_dim)
+        
         
         self._init_weights()
     
@@ -214,13 +220,22 @@ class MultiLayerReducedBasisResNetMultiChannel(nn.Module):
         self.C_in = rb.n_channels
         self.layers = layers
         
-        # First block: input basis -> output basis
+        #Zero block: input basis -> input basis
         self.block0 = ReducedBasisResNetMultiChannel(
+            rb, k_in=k_in, k_out=k_out,
+            hidden=hidden, depth=depth, dropout=dropout,
+            use_input_basis_for_encoder=True,
+            use_input_basis_for_decoder=True
+        )
+        self.gate0 = ScalarGate(init=init_scale)
+        
+        # First block: input basis -> output basis
+        self.block1 = ReducedBasisResNetMultiChannel(
             rb, k_in=k_in, k_out=k_out,
             hidden=hidden, depth=depth, dropout=dropout,
             use_input_basis_for_encoder=True
         )
-        self.gate0 = ScalarGate(init=init_scale)
+        self.gate1 = ScalarGate(init=init_scale)
         
         # Subsequent blocks: output basis -> output basis
         # These need special handling since output is single channel
@@ -255,8 +270,10 @@ class MultiLayerReducedBasisResNetMultiChannel(nn.Module):
         if x.ndim != 4:
             raise ValueError(f"Expected 4D input (B, C_in, N, M), got {x.shape}")
         
-        # First block with multi-channel input
         y = self.gate0(self.block0(x))  # (B, 1, N, M)
+        y = self.act(y)
+        # First block with multi-channel input
+        y = self.gate1(self.block1(x))  # (B, 1, N, M)
         
         # Subsequent blocks with single-channel input
         for block, gate in zip(self.blocks, self.gates):
