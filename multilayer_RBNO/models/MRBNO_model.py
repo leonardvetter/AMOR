@@ -6,111 +6,9 @@ from typing import Optional
 from dataclasses import dataclass
 from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
+from PCAReducer import PCAReducer
 
 
-# ============= PCAReducer Class =============
-@dataclass
-class PCAConfig:
-    svd_solver: str = 'auto'
-    whiten: bool = False
-    random_state: Optional[int] = None
-
-class PCAReducer:
-    """
-    PCA-based reduced-basis helper for (num_samples, N, N) fields.
-    - Fits separate PCA models for inputs and outputs.
-    - Projects to first k components or components covering a variance cutoff j.
-    - Reconstructs outputs from reduced coefficients.
-    """
-    def __init__(self, cfg: PCAConfig = PCAConfig()):
-        self.cfg = cfg
-        self.pca_in:  Optional[PCA] = None
-        self.pca_out: Optional[PCA] = None
-        self.shape_ = None  # (N, N)
-
-    def fit(self, samples: np.ndarray, solution: np.ndarray):
-        """
-        samples, solution: (num_samples, N, N).
-        """
-        assert samples.shape == solution.shape and samples.ndim == 3, "Use (num_samples, N, N)"
-        num_samples, N, M = samples.shape
-        self.shape_ = (N, M)
-
-        X_in  = samples.reshape(num_samples, -1).astype(np.float32, copy=False)
-        Y_out = solution.reshape(num_samples, -1).astype(np.float32, copy=False)
-
-        self.pca_in  = PCA(n_components=None, svd_solver=self.cfg.svd_solver,
-                           whiten=self.cfg.whiten, random_state=self.cfg.random_state).fit(X_in)
-        self.pca_out = PCA(n_components=None, svd_solver=self.cfg.svd_solver,
-                           whiten=self.cfg.whiten, random_state=self.cfg.random_state).fit(Y_out)
-        return self
-
-    @staticmethod
-    def _k_from_cutoff(evr: np.ndarray, cutoff: float) -> int:
-        return int(np.searchsorted(np.cumsum(evr), cutoff) + 1)
-
-    def k_from_cutoff(self, j_in: float = 0.99, j_out: float = 0.99) -> tuple[int, int]:
-        """Return (k_in, k_out) meeting given variance cutoffs."""
-        assert self.pca_in and self.pca_out
-        k_in  = self._k_from_cutoff(self.pca_in.explained_variance_ratio_,  j_in)
-        k_out = self._k_from_cutoff(self.pca_out.explained_variance_ratio_, j_out)
-        return k_in, k_out
-
-    def transform_inputs(self, samples: np.ndarray, k: Optional[int] = None) -> np.ndarray:
-        """Return input PCA coefficients (num_samples, k)."""
-        assert self.pca_in
-        X = samples.reshape(samples.shape[0], -1).astype(np.float32, copy=False)
-        Z = self.pca_in.transform(X)
-        return Z[:, :k] if k is not None else Z
-
-    def transform_outputs(self, solution: np.ndarray, k: Optional[int] = None) -> np.ndarray:
-        """Return output PCA coefficients (num_samples, k)."""
-        assert self.pca_out
-        Y = solution.reshape(solution.shape[0], -1).astype(np.float32, copy=False)
-        Z = self.pca_out.transform(Y)
-        return Z[:, :k] if k is not None else Z
-
-    def inverse_outputs(self, coeffs: np.ndarray, k: Optional[int] = None) -> np.ndarray:
-        """
-        Reconstruct outputs (num_samples, N, N) from output PCA coeffs.
-        If k is provided, only the first k components are used.
-        """
-        assert self.pca_out and self.shape_ is not None
-        if k is None:
-            Y_flat = self.pca_out.inverse_transform(coeffs)
-        else:
-            comps = self.pca_out.components_[:k, :]
-            mean  = self.pca_out.mean_
-            Y_flat = coeffs @ comps + mean
-        return Y_flat.reshape((coeffs.shape[0], *self.shape_))
-
-    def plot_explained_variance(self):
-        """Plot explained variance ratios for input and output PCA."""
-        assert self.pca_in and self.pca_out
-        fig, axes = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
-        axes[0].plot(self.pca_in.explained_variance_ratio_, marker='o', linewidth=1)
-        axes[0].set_title("Input PCA — explained variance ratio")
-        axes[0].set_xlabel("Component")
-        axes[0].set_ylabel("EVR")
-        axes[0].grid(True)
-        axes[1].plot(self.pca_out.explained_variance_ratio_, marker='o', linewidth=1)
-        axes[1].set_title("Output PCA — explained variance ratio")
-        axes[1].set_xlabel("Component")
-        axes[1].set_ylabel("EVR")
-        axes[1].grid(True)
-        plt.show()
-
-    @property
-    def input_components(self) -> np.ndarray:
-        """(n_in_components, D) principal directions for inputs."""
-        assert self.pca_in
-        return self.pca_in.components_
-
-    @property
-    def output_components(self) -> np.ndarray:
-        """(n_out_components, D) principal directions for outputs."""
-        assert self.pca_out
-        return self.pca_out.components_
 
 
 # ============= Neural Network Architecture =============
@@ -150,7 +48,7 @@ class ReducedBasisResNet(nn.Module):
     """
     def __init__(self, rb: PCAReducer, k_in: int, k_out: int, 
                  hidden: int = 256, depth: int = 4, dropout: float = 0.0,
-                 use_input_basis_for_encoder: bool = False):
+                 use_input_basis_for_encoder: bool = False,use_input_basis_for_decoder: bool = False):
         super().__init__()
         
         # Validate PCAReducer
@@ -186,9 +84,13 @@ class ReducedBasisResNet(nn.Module):
             enc_components = rb.pca_out.components_[:k_out, :].astype(np.float32)
             enc_mean = rb.pca_out.mean_.astype(np.float32)
         
-        # Always use output PCA for decoding
-        dec_components = rb.pca_out.components_[:k_out, :].astype(np.float32)
-        dec_mean = rb.pca_out.mean_.astype(np.float32)
+        # Usually use output PCA for decoding except for 0 block
+        if use_input_basis_for_decoder:
+            dec_components = rb.pca_in.components_[:k_in, :].astype(np.float32)
+            dec_mean = rb.pca_in.mean_.astype(np.float32)
+        else:
+            dec_components = rb.pca_out.components_[:k_out, :].astype(np.float32)
+            dec_mean = rb.pca_out.mean_.astype(np.float32)
         
         # Register as buffers
         self.register_buffer("enc_components_t", torch.from_numpy(enc_components.T))  # (D, encoder_dim)
@@ -268,13 +170,20 @@ class MultiLayerReducedBasisResNet(nn.Module):
         self.N, self.M = rb.shape_
         self.layers = layers
         
-        # First block: input basis -> output basis (use_input_basis_for_encoder=True)
+        # Zero block: input basis -> output basis (use_input_basis_for_encoder=True)
         self.block0 = ReducedBasisResNet(
+            rb, k_in=k_in, k_out=k_out,
+            hidden=hidden, depth=depth, dropout=dropout,
+            use_input_basis_for_encoder=True,use_input_basis_for_decoder = True
+        )
+        self.gate0 = ScalarGate(init=init_scale)
+        # First block: input basis -> output basis (use_input_basis_for_encoder=True)
+        self.block1 = ReducedBasisResNet(
             rb, k_in=k_in, k_out=k_out,
             hidden=hidden, depth=depth, dropout=dropout,
             use_input_basis_for_encoder=True
         )
-        self.gate0 = ScalarGate(init=init_scale)
+        self.gate1 = ScalarGate(init=init_scale)
         
         # Subsequent blocks: output basis -> output basis
         if layers > 0:
@@ -310,13 +219,21 @@ class MultiLayerReducedBasisResNet(nn.Module):
         if x.ndim != 4 or x.shape[1] != 1:
             raise ValueError(f"Expected (B, 1, N, M), got {x.shape}")
         
-        # First block with input basis encoding
+        # zero block with input basis encoding and decoding
         y = x + self.gate0(self.block0(x))
+        y = self.act(y)  # Nonlinearity between blocks
+
+        #first block change from input basis encoding to output basis decoding
+        #We should possibly remove the skip connection around block 1 since it can be different spaces.
+        #y = x + self.gate1(self.block1(x))  
+        y = self.block1(x)
         
         # Subsequent blocks with output basis encoding
         for block, gate in zip(self.blocks, self.gates):
             y = self.act(y)  # Nonlinearity between blocks
             y = y + gate(block(y))  # Residual connection
+
+        #Furthermore, we can add a learnable linear transformation W around each block
         
         return y
     
