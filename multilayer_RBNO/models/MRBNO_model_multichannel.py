@@ -132,9 +132,11 @@ class ReducedBasisResNetMultiChannel(nn.Module):
                 enc_mean = np.pad(enc_mean, (0, self.D_in - enc_mean.shape[0]), 'constant')
 
         if use_input_basis_for_decoder:
+            # For input basis decoder, we need to map to output space
             self.decoder_dim = k_in
-            dec_components = rb.pca_in.components_[:k_in, :].astype(np.float32)
-            dec_mean = rb.pca_in.mean_.astype(np.float32)
+            # Use input PCA components but map to output dimension
+            dec_components = rb.pca_in.components_[:k_in, :self.D_out].astype(np.float32)
+            dec_mean = rb.pca_out.mean_.astype(np.float32)  # Use output mean
         else:
             self.decoder_dim = k_out
             dec_components = rb.pca_out.components_[:k_out, :].astype(np.float32)
@@ -202,6 +204,91 @@ class ReducedBasisResNetMultiChannel(nn.Module):
         return y
 
 
+class ReducedBasisResNetSingleChannel(nn.Module):
+    """
+    Simplified ResNet block for single-channel inputs that works directly in output basis.
+    Used for subsequent blocks in MultiLayerReducedBasisResNetMultiChannel.
+    """
+    
+    def __init__(self, rb: PCAReducerMultiChannel, k_out: int, 
+                 hidden: int = 256, depth: int = 4, dropout: float = 0.0):
+        super().__init__()
+        
+        if rb.pca_out is None:
+            raise ValueError("PCAReducer must be fitted")
+        
+        self.N, self.M = rb.shape_
+        self.D_out = self.N * self.M  # Output dimension
+        self.k_out = k_out
+        
+        # Validate k_out
+        max_k_out = rb.pca_out.n_components_
+        if not (1 <= k_out <= max_k_out):
+            raise ValueError(f"k_out={k_out} out of range [1, {max_k_out}]")
+        
+        # Use output PCA for both encoding and decoding
+        dec_components = rb.pca_out.components_[:k_out, :].astype(np.float32)
+        dec_mean = rb.pca_out.mean_.astype(np.float32)
+        
+        # Register as buffers
+        self.register_buffer("dec_components", torch.from_numpy(dec_components))  # (k_out, D_out)
+        self.register_buffer("dec_mean", torch.from_numpy(dec_mean))  # (D_out,)
+        
+        # ResNet in coefficient space
+        self.in_proj = nn.Linear(k_out, hidden)
+        self.blocks = nn.ModuleList([ResidualBlock(hidden, dropout) for _ in range(depth)])
+        self.out_proj = nn.Linear(hidden, k_out)
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Xavier initialization for linear layers."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight, gain=0.5)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+    
+    def encode(self, x_flat: torch.Tensor) -> torch.Tensor:
+        """Project to PCA coefficient space."""
+        x_centered = x_flat - self.dec_mean
+        return x_centered @ self.dec_components.T  # (B, k_out)
+    
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Reconstruct from PCA coefficients."""
+        return z @ self.dec_components + self.dec_mean  # (B, D_out)
+    
+    def forward(self, x):
+        """
+        x: (B, 1, N, M) single-channel input
+        returns: (B, 1, N, M) single-channel output
+        """
+        if x.ndim != 4:
+            raise ValueError(f"Expected 4D input (B, 1, N, M), got {x.shape}")
+        
+        B, C, H, W = x.shape
+        if C != 1 or H != self.N or W != self.M:
+            raise ValueError(f"Expected (B, 1, {self.N}, {self.M}), got {x.shape}")
+        
+        # Flatten
+        x_flat = x.reshape(B, self.D_out)
+        
+        # Encode to coefficients
+        z = self.encode(x_flat)  # (B, k_out)
+        
+        # Transform in coefficient space
+        h = F.gelu(self.in_proj(z))  # (B, hidden)
+        for block in self.blocks:
+            h = block(h)  # (B, hidden)
+        z_out = self.out_proj(h)  # (B, k_out)
+        
+        # Decode back to function space
+        y_flat = self.decode(z_out)  # (B, D_out)
+        y = y_flat.reshape(B, 1, self.N, self.M)
+        
+        return y
+
+
 class MultiLayerReducedBasisResNetMultiChannel(nn.Module):
     """
     Stacks multiple ReducedBasisResNet blocks with residual connections.
@@ -210,7 +297,8 @@ class MultiLayerReducedBasisResNetMultiChannel(nn.Module):
     
     def __init__(self, rb: PCAReducerMultiChannel, k_in: int, k_out: int,
                  layers: int = 4, hidden: int = 256, depth: int = 4,
-                 dropout: float = 0.0, init_scale: float = 0.1):
+                 dropout: float = 0.0, init_scale: float = 0.1, 
+                 use_skip_connections: bool = True):
         super().__init__()
         
         if rb.shape_ is None or rb.n_channels is None:
@@ -219,8 +307,9 @@ class MultiLayerReducedBasisResNetMultiChannel(nn.Module):
         self.N, self.M = rb.shape_
         self.C_in = rb.n_channels
         self.layers = layers
+        self.use_skip_connections = use_skip_connections
         
-        #Zero block: input basis -> input basis
+        # Zero block: input basis -> input basis
         self.block0 = ReducedBasisResNetMultiChannel(
             rb, k_in=k_in, k_out=k_out,
             hidden=hidden, depth=depth, dropout=dropout,
@@ -238,20 +327,13 @@ class MultiLayerReducedBasisResNetMultiChannel(nn.Module):
         self.gate1 = ScalarGate(init=init_scale)
         
         # Subsequent blocks: output basis -> output basis
-        # These need special handling since output is single channel
+        # These work directly on single-channel output from previous blocks
         if layers > 0:
-            # Create a modified PCAReducer for subsequent blocks
-            rb_single = PCAReducerMultiChannel()
-            rb_single.pca_in = rb.pca_out  # Use output PCA for both
-            rb_single.pca_out = rb.pca_out
-            rb_single.n_channels = 1  # Single channel
-            rb_single.shape_ = rb.shape_
-            
+            # For subsequent blocks, we need a different approach since they work on single-channel
+            # We'll create a simplified version that works directly in the output basis
             self.blocks = nn.ModuleList([
-                ReducedBasisResNetMultiChannel(
-                    rb_single, k_in=k_out, k_out=k_out,
-                    hidden=hidden, depth=depth, dropout=dropout,
-                    use_input_basis_for_encoder=False
+                ReducedBasisResNetSingleChannel(
+                    rb, k_out=k_out, hidden=hidden, depth=depth, dropout=dropout
                 ) for _ in range(layers)
             ])
             
@@ -270,15 +352,28 @@ class MultiLayerReducedBasisResNetMultiChannel(nn.Module):
         if x.ndim != 4:
             raise ValueError(f"Expected 4D input (B, C_in, N, M), got {x.shape}")
         
-        y = self.gate0(self.block0(x))  # (B, 1, N, M)
-        y = self.act(y)
-        # First block with multi-channel input
-        y = self.gate1(self.block1(x))  # (B, 1, N, M)
+        # Zero block: input basis -> input basis
+        y0 = self.gate0(self.block0(x))  # (B, 1, N, M)
+        y0 = self.act(y0)
         
-        # Subsequent blocks with single-channel input
-        for block, gate in zip(self.blocks, self.gates):
+        # First block: input basis -> output basis
+        y1 = self.gate1(self.block1(x))  # (B, 1, N, M)
+        
+        # Combine first two blocks
+        if self.use_skip_connections:
+            y = y0 + y1  # Skip connection from zero block
+        else:
+            y = y1
+        
+        # Subsequent blocks: output basis -> output basis
+        for i, (block, gate) in enumerate(zip(self.blocks, self.gates)):
             y = self.act(y)  # Nonlinearity between blocks
-            y = y + gate(block(y))  # Residual connection
+            residual = gate(block(y))  # (B, 1, N, M)
+            
+            if self.use_skip_connections:
+                y = y + residual  # Residual connection
+            else:
+                y = residual
         
         return y
 
