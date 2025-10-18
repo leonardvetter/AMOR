@@ -15,13 +15,17 @@ from MRBNO_model import PCAReducer, ResidualBlock, ScalarGate
 class PCAReducerMultiChannel:
     """
     PCA-based reduced-basis helper for multi-channel (num_samples, C_in, N, N) inputs
-    and single-channel (num_samples, N, N) outputs.
+    and single-channel (num_samples, N, N) outputs with boundary condition awareness.
     """
     
-    def __init__(self, svd_solver='auto', whiten=False, random_state=None):
+    def __init__(self, svd_solver='auto', whiten=False, random_state=None, 
+                 bc_weight=1.0, boundary_threshold=0.1, use_boundary_weighting=False):
         self.svd_solver = svd_solver
         self.whiten = whiten
         self.random_state = random_state
+        self.bc_weight = bc_weight  # Weight for boundary samples
+        self.boundary_threshold = boundary_threshold  # Distance threshold for boundary
+        self.use_boundary_weighting = use_boundary_weighting  # Enable/disable boundary weighting
         self.pca_in: Optional[PCA] = None
         self.pca_out: Optional[PCA] = None
         self.n_channels = None
@@ -45,12 +49,41 @@ class PCAReducerMultiChannel:
         assert solution.ndim == 3, f"Expected (num_samples, N, N), got {solution.shape}"
         Y_out = solution.reshape(num_samples, -1).astype(np.float32, copy=False)
         
+        # Compute boundary weights for output PCA
+        if self.use_boundary_weighting:
+            boundary_weights = self._compute_boundary_weights(N, M)
+            # Apply boundary weights to output samples
+            Y_weighted = Y_out * boundary_weights.reshape(1, -1)
+        else:
+            Y_weighted = Y_out
+        
         self.pca_in = PCA(n_components=None, svd_solver=self.svd_solver,
                           whiten=self.whiten, random_state=self.random_state).fit(X_in)
         self.pca_out = PCA(n_components=None, svd_solver=self.svd_solver,
-                           whiten=self.whiten, random_state=self.random_state).fit(Y_out)
+                           whiten=self.whiten, random_state=self.random_state).fit(Y_weighted)
         
         return self
+    
+    def _compute_boundary_weights(self, N: int, M: int) -> np.ndarray:
+        """Compute weights for boundary condition awareness."""
+        weights = np.ones((N, M), dtype=np.float32)
+        
+        # Create coordinate grids
+        x = np.linspace(0, 1, N)
+        y = np.linspace(0, 1, M)
+        X, Y = np.meshgrid(x, y, indexing='ij')
+        
+        # Compute distance to boundaries
+        dist_to_boundary = np.minimum(
+            np.minimum(X, 1-X),  # Distance to left/right boundaries
+            np.minimum(Y, 1-Y)   # Distance to top/bottom boundaries
+        )
+        
+        # Apply boundary weighting
+        boundary_mask = dist_to_boundary < self.boundary_threshold
+        weights[boundary_mask] = self.bc_weight
+        
+        return weights.flatten()
 
     @staticmethod
     def _k_from_cutoff(evr: np.ndarray, cutoff: float) -> int:
@@ -309,28 +342,17 @@ class MultiLayerReducedBasisResNetMultiChannel(nn.Module):
         self.layers = layers
         self.use_skip_connections = use_skip_connections
         
-        # Zero block: input basis -> input basis
+        # Block 0: input basis -> output basis (transforms 2-channel to 1-channel)
         self.block0 = ReducedBasisResNetMultiChannel(
             rb, k_in=k_in, k_out=k_out,
             hidden=hidden, depth=depth, dropout=dropout,
             use_input_basis_for_encoder=True,
-            use_input_basis_for_decoder=True
+            use_input_basis_for_decoder=False
         )
         self.gate0 = ScalarGate(init=init_scale)
         
-        # First block: input basis -> output basis
-        self.block1 = ReducedBasisResNetMultiChannel(
-            rb, k_in=k_in, k_out=k_out,
-            hidden=hidden, depth=depth, dropout=dropout,
-            use_input_basis_for_encoder=True
-        )
-        self.gate1 = ScalarGate(init=init_scale)
-        
-        # Subsequent blocks: output basis -> output basis
-        # These work directly on single-channel output from previous blocks
+        # Subsequent blocks: output basis -> output basis (FNO-style residuals)
         if layers > 0:
-            # For subsequent blocks, we need a different approach since they work on single-channel
-            # We'll create a simplified version that works directly in the output basis
             self.blocks = nn.ModuleList([
                 ReducedBasisResNetSingleChannel(
                     rb, k_out=k_out, hidden=hidden, depth=depth, dropout=dropout
@@ -348,30 +370,25 @@ class MultiLayerReducedBasisResNetMultiChannel(nn.Module):
         """
         x: (B, C_in, N, M) multi-channel input
         returns: (B, 1, N, M) single-channel output
+        
+        FNO-style architecture:
+        - Block 0: Transform 2-channel input to 1-channel output (input->output basis)
+        - Blocks 1+: FNO-style residuals in output basis (y = y + gate(block(y)))
         """
         if x.ndim != 4:
             raise ValueError(f"Expected 4D input (B, C_in, N, M), got {x.shape}")
         
-        # Zero block: input basis -> input basis
-        y0 = self.gate0(self.block0(x))  # (B, 1, N, M)
-        y0 = self.act(y0)
+        # Block 0: Transform 2-channel input to 1-channel output
+        y = self.gate0(self.block0(x))  # (B, 1, N, M)
+        y = self.act(y)
         
-        # First block: input basis -> output basis
-        y1 = self.gate1(self.block1(x))  # (B, 1, N, M)
-        
-        # Combine first two blocks
-        if self.use_skip_connections:
-            y = y0 + y1  # Skip connection from zero block
-        else:
-            y = y1
-        
-        # Subsequent blocks: output basis -> output basis
+        # Subsequent blocks: FNO-style residuals in output basis
         for i, (block, gate) in enumerate(zip(self.blocks, self.gates)):
             y = self.act(y)  # Nonlinearity between blocks
             residual = gate(block(y))  # (B, 1, N, M)
             
             if self.use_skip_connections:
-                y = y + residual  # Residual connection
+                y = y + residual  # FNO-style residual: y = y + f(y)
             else:
                 y = residual
         
