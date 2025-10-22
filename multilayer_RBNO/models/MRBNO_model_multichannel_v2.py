@@ -112,15 +112,21 @@ class ReducedBasisResNetMultiChannelInputBasis(nn.Module):
 
 class MultiChannelMRBNOv2(nn.Module):
     """
-    Multi-Channel MRBNO v2: Proper multi-channel flow
+    Multi-Channel MRBNO v2: Proper multi-channel flow with skip connections around every block
     
     Architecture:
     - Block 0: Input basis -> Input basis (stays in input basis, outputs multi-channel)
-    - Block 1: Multi-channel -> Single-channel (transitions from input to output basis)
+    - Block 1: Multi-channel -> Single-channel (transitions from input to output basis) + skip from Block 0
     - Blocks 2+: Single-channel -> Single-channel (FNO-style residuals in output basis)
     
+    Skip Connections:
+    - Global skip: Direct path from 2-channel input to 1-channel output
+    - Block 0 → Block 1: Skip connection from Block 0 output to Block 1
+    - Blocks 2+: FNO-style residuals (y = y + gate(block(y)))
+    
     This allows the model to learn complex patterns in the input basis
-    before transitioning to the output basis.
+    before transitioning to the output basis, with skip connections preserving
+    information flow throughout the network.
     """
     
     def __init__(self, rb: PCAReducerMultiChannel, k_in: int, k_out: int,
@@ -177,10 +183,10 @@ class MultiChannelMRBNOv2(nn.Module):
         x: (B, C_in, N, M) multi-channel input
         returns: (B, 1, N, M) single-channel output
         
-        Architecture:
+        Architecture with skip connections around every block:
         - Global skip: Project 2-channel input directly to 1-channel output
         - Block 0: Transform 2-channel input to 2-channel output (input->input basis)
-        - Block 1: Transform 2-channel input to 1-channel output (input->output basis)
+        - Block 1: Transform 2-channel input to 1-channel output (input->output basis) + skip from Block 0
         - Blocks 2+: FNO-style residuals in output basis (y = y + gate(block(y)))
         """
         if x.ndim != 4:
@@ -193,20 +199,30 @@ class MultiChannelMRBNOv2(nn.Module):
         y0_multi = self.gate0(self.block0(x))  # (B, 2, N, M) - stays multi-channel
         y0_multi = self.act(y0_multi)
         
+        # Project Block 0's multi-channel output to single-channel for skip connection
+        y0_proj = self.global_skip_proj(y0_multi)  # (B, 2, N, M) -> (B, 1, N, M)
+        
         # Block 1: Transform 2-channel input to 1-channel output (switches to output basis)
         y1 = self.gate1(self.block1(x))  # (B, 1, N, M)
         y1 = self.act(y1)
         
-        # Project Block 0's multi-channel output to single-channel
-        y0_proj = self.global_skip_proj(y0_multi)  # (B, 2, N, M) -> (B, 1, N, M)
+        # Add skip connection from Block 0 to Block 1
+        if self.use_skip_connections:
+            y = y1 + y0_proj  # Skip connection: Block 0 → Block 1
+        else:
+            y = y1
         
-        # Combine all contributions
-        y = y0_proj + y1 + global_skip
+        # Add global skip to Block 1 output
+        y = y + global_skip
         
         # Subsequent blocks: FNO-style residuals in output basis
         for i, (block, gate) in enumerate(zip(self.blocks, self.gates)):
             y = self.act(y)  # Nonlinearity between blocks
             residual = gate(block(y))  # (B, 1, N, M)
-            y = y + residual
+            
+            if self.use_skip_connections:
+                y = y + residual  # FNO-style residual: y = y + f(y)
+            else:
+                y = residual
         
         return y
