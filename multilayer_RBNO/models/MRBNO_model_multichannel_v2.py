@@ -118,6 +118,7 @@ class MultiChannelMRBNOv2(nn.Module):
     - Block 0: Input basis -> Input basis (stays in input basis, outputs multi-channel)
     - Block 1: Multi-channel -> Single-channel (transitions from input to output basis) + skip from Block 0
     - Blocks 2+: Single-channel -> Single-channel (FNO-style residuals in output basis)
+    - blockLearnable (optional): Single-channel -> Single-channel with learnable basis and orthogonality penalty
     
     Skip Connections:
     - Global skip: Direct path from 2-channel input to 1-channel output
@@ -132,7 +133,7 @@ class MultiChannelMRBNOv2(nn.Module):
     def __init__(self, rb: PCAReducerMultiChannel, k_in: int, k_out: int,
                  layers: int = 4, hidden: int = 256, depth: int = 4,
                  dropout: float = 0.0, init_scale: float = 0.1, 
-                 use_skip_connections: bool = True, block0_dropout: float = 0.0):
+                 use_skip_connections: bool = True, block0_dropout: float = 0.0 ,add_learnable_basis_block: bool = False,ortho_penalty_weight: float = 1e-3):
         super().__init__()
         
         if rb.shape_ is None or rb.n_channels is None:
@@ -142,7 +143,10 @@ class MultiChannelMRBNOv2(nn.Module):
         self.C_in = rb.n_channels
         self.layers = layers
         self.use_skip_connections = use_skip_connections
-        
+        self.add_learnable_basis_block = add_learnable_basis_block
+        self.ortho_penalty_weight = ortho_penalty_weight
+
+
         # Block 0: Input basis -> Input basis (stays in input basis, outputs multi-channel)
         self.block0 = ReducedBasisResNetMultiChannelInputBasis(
             rb, k_in=k_in,  # Stay in input basis
@@ -158,6 +162,14 @@ class MultiChannelMRBNOv2(nn.Module):
             use_input_basis_for_decoder=False  # Switch to output basis
         )
         self.gate1 = ScalarGate(init=init_scale)
+
+        if self.add_learnable_basis_block:
+            self.blockLearnable = ReducedBasisResNetSingleChannelLearnable(
+                rb, k_out=k_out,
+                hidden=hidden, depth=depth, dropout=dropout,
+                ortho_penalty_weight=1e-3
+            )
+            self.gateLearnable = ScalarGate(init=init_scale)
         
         # Global skip connection: project 2-channel input directly to 1-channel output
         self.global_skip_proj = nn.Conv2d(self.C_in, 1, 1)
@@ -178,7 +190,7 @@ class MultiChannelMRBNOv2(nn.Module):
         
         self.act = nn.GELU()
     
-    def forward(self, x):
+    def forward(self, x,return_penalty: Optional[bool]=False):
         """
         x: (B, C_in, N, M) multi-channel input
         returns: (B, 1, N, M) single-channel output
@@ -224,5 +236,181 @@ class MultiChannelMRBNOv2(nn.Module):
                 y = y + residual  # FNO-style residual: y = y + f(y)
             else:
                 y = residual
+
+        if self.add_learnable_basis_block:
+            y = self.act(y)
+            residual, ortho_penalty = self.blockLearnable(y, return_penalty=True)
+
+            return y + self.gateLearnable(residual), ortho_penalty
+        else:
+            return y
+
+
+
+"""
+Learnable basis block with orthogonalization penalty
+"""
+
+class ReducedBasisResNetSingleChannelLearnable(nn.Module):
+    """
+    Simplified ResNet block for single-channel inputs with learnable basis.
+    The basis is initialized from output PCA but is learnable during training.
+    Includes orthogonality penalty to maintain approximate orthogonality.
+    """
+    
+    def __init__(self, rb, k_out: int, 
+                 hidden: int = 256, depth: int = 4, dropout: float = 0.0,
+                 ortho_penalty_weight: float = 1e-3):
+        super().__init__()
         
+        if rb.pca_out is None:
+            raise ValueError("PCAReducer must be fitted")
+        
+        self.N, self.M = rb.shape_
+        self.D_out = self.N * self.M  # Output dimension
+        self.k_out = k_out
+        self.ortho_penalty_weight = ortho_penalty_weight
+        
+        # Validate k_out
+        max_k_out = rb.pca_out.n_components_
+        if not (1 <= k_out <= max_k_out):
+            raise ValueError(f"k_out={k_out} out of range [1, {max_k_out}]")
+        
+        # Initialize from output PCA
+        dec_components_init = rb.pca_out.components_[:k_out, :].astype(np.float32)
+        dec_mean_init = rb.pca_out.mean_.astype(np.float32)
+        
+        # Make basis learnable as parameters instead of buffers
+        self.enc_basis = nn.Parameter(torch.from_numpy(dec_components_init.copy()))  # (k_out, D_out)
+        self.dec_basis = nn.Parameter(torch.from_numpy(dec_components_init.copy()))  # (k_out, D_out)
+        
+        # Make mean learnable as well (optional - you can keep it fixed if preferred)
+        self.enc_mean = nn.Parameter(torch.from_numpy(dec_mean_init.copy()))  # (D_out,)
+        self.dec_mean = nn.Parameter(torch.from_numpy(dec_mean_init.copy()))  # (D_out,)
+        
+        # Alternative: Keep means fixed
+        # self.register_buffer("enc_mean", torch.from_numpy(dec_mean_init))
+        # self.register_buffer("dec_mean", torch.from_numpy(dec_mean_init))
+        
+        # ResNet in coefficient space
+        self.in_proj = nn.Linear(k_out, hidden)
+        self.blocks = nn.ModuleList([ResidualBlock(hidden, dropout) for _ in range(depth)])
+        self.out_proj = nn.Linear(hidden, k_out)
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Xavier initialization for linear layers."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight, gain=0.5)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+    
+    def encode(self, x_flat: torch.Tensor) -> torch.Tensor:
+        """Project to coefficient space using learnable encoder basis."""
+        x_centered = x_flat - self.enc_mean
+        return x_centered @ self.enc_basis.T  # (B, k_out)
+    
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Reconstruct from coefficients using learnable decoder basis."""
+        return z @ self.dec_basis + self.dec_mean  # (B, D_out)
+    
+    def compute_orthogonality_penalty(self):
+        """
+        Compute penalty for deviation from orthogonality.
+        For orthonormal basis B, we want B @ B.T = I
+        """
+        # Encoder basis orthogonality
+        enc_gram = self.enc_basis @ self.enc_basis.T  # (k_out, k_out)
+        enc_eye = torch.eye(self.k_out, device=enc_gram.device)
+        enc_penalty = torch.norm(enc_gram - enc_eye, p='fro')**2
+        
+        # Decoder basis orthogonality
+        dec_gram = self.dec_basis @ self.dec_basis.T  # (k_out, k_out)
+        dec_eye = torch.eye(self.k_out, device=dec_gram.device)
+        dec_penalty = torch.norm(dec_gram - dec_eye, p='fro')**2
+        
+        # Optional: Also penalize deviation from unit norm for each basis vector
+        enc_norm_penalty = torch.sum((torch.norm(self.enc_basis, dim=1) - 1)**2)
+        dec_norm_penalty = torch.sum((torch.norm(self.dec_basis, dim=1) - 1)**2)
+        
+        total_penalty = enc_penalty + dec_penalty + 0.1 * (enc_norm_penalty + dec_norm_penalty)
+        
+        return total_penalty
+    
+    def project_to_orthonormal(self):
+        """
+        Optional: Project bases to orthonormal manifold using SVD.
+        Can be called periodically during training or after training.
+        """
+        with torch.no_grad():
+            # Project encoder basis
+            U, S, Vt = torch.linalg.svd(self.enc_basis, full_matrices=False)
+            self.enc_basis.data = U @ Vt
+            
+            # Project decoder basis
+            U, S, Vt = torch.linalg.svd(self.dec_basis, full_matrices=False)
+            self.dec_basis.data = U @ Vt
+    
+    def forward(self, x, return_penalty=False):
+        """
+        x: (B, 1, N, M) single-channel input
+        returns: 
+            - (B, 1, N, M) single-channel output
+            - optionally also returns orthogonality penalty if return_penalty=True
+        """
+        if x.ndim != 4:
+            raise ValueError(f"Expected 4D input (B, 1, N, M), got {x.shape}")
+        
+        B, C, H, W = x.shape
+        if C != 1 or H != self.N or W != self.M:
+            raise ValueError(f"Expected (B, 1, {self.N}, {self.M}), got {x.shape}")
+        
+        # Flatten
+        x_flat = x.reshape(B, self.D_out)
+        
+        # Encode to coefficients
+        z = self.encode(x_flat)  # (B, k_out)
+        
+        # Transform in coefficient space
+        h = F.gelu(self.in_proj(z))  # (B, hidden)
+        for block in self.blocks:
+            h = block(h)  # (B, hidden)
+        z_out = self.out_proj(h)  # (B, k_out)
+        
+        # Decode back to function space
+        y_flat = self.decode(z_out)  # (B, D_out)
+        y = y_flat.reshape(B, 1, self.N, self.M)
+        
+        if return_penalty:
+            penalty = self.compute_orthogonality_penalty()
+            return y, penalty
         return y
+    
+    def get_basis_info(self):
+        """Get information about the learned bases."""
+        with torch.no_grad():
+            # Check orthogonality
+            enc_gram = self.enc_basis @ self.enc_basis.T
+            dec_gram = self.dec_basis @ self.dec_basis.T
+            enc_eye = torch.eye(self.k_out, device=enc_gram.device)
+            dec_eye = torch.eye(self.k_out, device=dec_gram.device)
+            
+            info = {
+                'encoder_ortho_error': torch.norm(enc_gram - enc_eye).item(),
+                'decoder_ortho_error': torch.norm(dec_gram - dec_eye).item(),
+                'encoder_mean_norm': torch.norm(self.enc_mean).item(),
+                'decoder_mean_norm': torch.norm(self.dec_mean).item(),
+                'encoder_basis_norm': torch.norm(self.enc_basis, dim=1).mean().item(),
+                'decoder_basis_norm': torch.norm(self.dec_basis, dim=1).mean().item(),
+            }
+        return info
+
+
+
+
+
+
+
+
