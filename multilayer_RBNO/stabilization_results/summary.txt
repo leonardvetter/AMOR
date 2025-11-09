@@ -1,0 +1,47 @@
+======================================================================
+STABILIZATION STRATEGIES COMPARISON
+======================================================================
+
+Source: stabilization_results/results.json
+Metrics: best validation MSE (lower is better)
+
+Model: mrbno_simple_v1__bn_false
+  Best strategy: cosine_lr_high (mean=7.7516e-02, std=2.0759e-02, min=4.7511e-02)
+
+  Strategy                  Mean       Std        Min        Max        CV
+  ------------------------------------------------------------------
+  cosine_lr_high            7.7516e-02 2.0759e-02 4.7511e-02 1.0928e-01 0.2678    
+  constant_lr               7.7570e-02 2.1796e-02 4.3436e-02 1.1150e-01 0.2810    
+  plateau_default           8.0834e-02 2.5627e-02 4.2228e-02 1.2217e-01 0.3170    
+  linear_decay              8.7779e-02 2.6146e-02 4.8670e-02 1.2520e-01 0.2979    
+  step_decay                8.7856e-02 2.5321e-02 4.9780e-02 1.2547e-01 0.2882    
+  multistep_decay           8.7856e-02 2.5321e-02 4.9780e-02 1.2547e-01 0.2882    
+  cosine_base               8.8086e-02 2.5691e-02 4.8995e-02 1.2422e-01 0.2917    
+  cosine_low_min            8.8095e-02 2.5711e-02 4.8731e-02 1.2405e-01 0.2919    
+  cosine_restart            8.8268e-02 2.6966e-02 4.8817e-02 1.3271e-01 0.3055    
+  plateau_aggressive        8.9354e-02 2.8099e-02 4.8869e-02 1.3241e-01 0.3145    
+  warmup_cosine_warm5       9.0797e-02 2.7361e-02 4.9545e-02 1.3169e-01 0.3013    
+  cosine_short_cycle        9.3088e-02 2.3203e-02 5.6360e-02 1.2481e-01 0.2493    
+
+Model: mrbno_simple_v2__bn_false
+  Best strategy: linear_decay (mean=8.9088e-02, std=1.3726e-02, min=6.9572e-02)
+
+  Strategy                  Mean       Std        Min        Max        CV
+  ------------------------------------------------------------------
+  linear_decay              8.9088e-02 1.3726e-02 6.9572e-02 1.1780e-01 0.1541    
+  step_decay                8.9585e-02 1.3925e-02 6.8410e-02 1.1986e-01 0.1554    
+  multistep_decay           8.9585e-02 1.3925e-02 6.8410e-02 1.1986e-01 0.1554    
+  plateau_default           8.9666e-02 1.1435e-02 7.0852e-02 1.0763e-01 0.1275    
+  cosine_lr_high            9.0569e-02 9.7236e-03 7.6442e-02 1.1408e-01 0.1074    
+  cosine_low_min            9.0710e-02 1.4334e-02 6.9819e-02 1.2119e-01 0.1580    
+  cosine_restart            9.0752e-02 1.2052e-02 7.1442e-02 1.1612e-01 0.1328    
+  cosine_base               9.0905e-02 1.4546e-02 6.9761e-02 1.2205e-01 0.1600    
+  warmup_cosine_warm5       9.1014e-02 1.3896e-02 6.8961e-02 1.1580e-01 0.1527    
+  constant_lr               9.1672e-02 9.5673e-03 7.3682e-02 1.0247e-01 0.1044    
+  plateau_aggressive        9.3653e-02 1.5179e-02 7.3364e-02 1.2083e-01 0.1621    
+  cosine_short_cycle        9.4781e-02 1.4230e-02 7.1575e-02 1.2213e-01 0.1501    
+
+======================================================================
+Legend:
+  CV = coefficient of variation (std/mean)
+======================================================================
