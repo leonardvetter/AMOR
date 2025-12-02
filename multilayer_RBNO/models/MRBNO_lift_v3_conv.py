@@ -19,8 +19,8 @@ class ReducedBasisBlockMultiChannelV3Conv(nn.Module):
     """
     Multi-channel reduced-basis block with convolution instead of einsum.
     
-    Key difference from V3: Replaces einsum("bwi,woij->boj", z, weight) with
-    a finite-kernel 1D convolution along the width dimension.
+    Uses finite-kernel 1D convolution along the width dimension instead of
+    einsum("bwi,woij->boj", z, weight) transformation.
     """
 
     def __init__(
@@ -190,6 +190,10 @@ class ReducedBasisBlockMultiChannelV3Conv(nn.Module):
         """
         x: (B, width, D_in) or (B, width, D_out) depending on the block
         returns: (B, width, output_dim)
+        
+        Keeps tensors in convolution format (B, decoder_dim, width) for
+        convolution, residual, and batch norm operations, then transposes
+        to (B, width, decoder_dim) before decode.
         """
         if x.ndim != 3:
             raise ValueError(f"Expected 3D input (B, width, D), got {x.shape}")
@@ -197,26 +201,29 @@ class ReducedBasisBlockMultiChannelV3Conv(nn.Module):
         # Encode to coefficients
         z = self.encode(x)  # (B, width, encoder_dim)
 
-        # Uses projection + convolution instead of einsum
         # Project to decoder dimension
         z_proj = self.proj(z)  # (B, width, decoder_dim)
         
+        # Transpose to convolution format: (B, width, decoder_dim) -> (B, decoder_dim, width)
+        z_conv_format = z_proj.transpose(1, 2).contiguous()  # (B, decoder_dim, width)
+        
         # Apply convolution along width dimension
-        # Transpose: (B, width, decoder_dim) -> (B, decoder_dim, width)
         # Conv mixes width channels for each decoder_dim feature independently
-        z_transposed = z_proj.transpose(1, 2)  # (B, decoder_dim, width)
-        z_conv = self.conv(z_transposed)  # (B, decoder_dim, width)
-        z_conv = z_conv.transpose(1, 2)  # (B, width, decoder_dim)
+        z_conv = self.conv(z_conv_format)  # (B, decoder_dim, width)
         
         # Optional residual connection (mixes width channels)
-        z_out = z_conv + self.w(z_conv.transpose(1, 2)).transpose(1, 2)  # (B, width, decoder_dim)
+        # Residual operates in (B, decoder_dim, width) format
+        z_residual = self.w(z_conv)  # (B, decoder_dim, width)
+        z_out = z_conv + z_residual  # (B, decoder_dim, width)
 
-        # Optional batch norm
-        z_out = z_out.transpose(1, 2)  # (B, decoder_dim, width)
-        z_out = self.bn(z_out)
-        z_out = z_out.transpose(1, 2)  # (B, width, decoder_dim)
+        # Optional batch norm in (B, decoder_dim, width) format
+        z_out = self.bn(z_out)  # (B, decoder_dim, width)
 
-        z_out = self.dropout(z_out)
+        # Dropout
+        z_out = self.dropout(z_out)  # (B, decoder_dim, width)
+
+        # Transpose to decode format: (B, decoder_dim, width) -> (B, width, decoder_dim)
+        z_out = z_out.transpose(1, 2).contiguous()  # (B, width, decoder_dim)
 
         # Decode back to function space
         y = self.decode(z_out)  # (B, width, output_dim)
