@@ -50,6 +50,13 @@ class ReducedBasisBlockMultiChannelV3Conv(nn.Module):
         self.D_out = self.C_out * self.N * self.M
         self.width = width
 
+        # Validate conv_kernel_size
+        if conv_kernel_size > width:
+            raise ValueError(
+                f"conv_kernel_size={conv_kernel_size} must be <= width={width}. "
+                f"The convolution kernel cannot be larger than the width dimension."
+            )
+
         # Determine output dimension based on decoder choice
         if use_input_basis_for_decoder:
             self.output_dim = self.D_in
@@ -107,13 +114,25 @@ class ReducedBasisBlockMultiChannelV3Conv(nn.Module):
         self.proj = nn.Linear(self.encoder_dim, self.decoder_dim)
         # Conv1d operates on (B, decoder_dim, width): mixes width channels for each decoder_dim feature
         # groups=decoder_dim means each feature dimension mixes independently
-        self.conv = nn.Conv1d(
-            in_channels=self.decoder_dim,
-            out_channels=self.decoder_dim,
-            kernel_size=conv_kernel_size,
-            padding=(conv_kernel_size - 1) // 2,  # Same padding
-            groups=self.decoder_dim  # Each decoder_dim feature mixes width channels independently
-        )
+        # Use padding='same' if available (PyTorch 1.9+), otherwise use manual padding
+        # Note: padding='same' handles both odd and even kernel sizes correctly
+        try:
+            self.conv = nn.Conv1d(
+                in_channels=self.decoder_dim,
+                out_channels=self.decoder_dim,
+                kernel_size=conv_kernel_size,
+                padding='same',  # Preserves input size for both odd and even kernel sizes
+                groups=self.decoder_dim  # Each decoder_dim feature mixes width channels independently
+            )
+        except TypeError:
+            # Fallback for older PyTorch versions: use manual padding (only works perfectly for odd kernel sizes)
+            self.conv = nn.Conv1d(
+                in_channels=self.decoder_dim,
+                out_channels=self.decoder_dim,
+                kernel_size=conv_kernel_size,
+                padding=(conv_kernel_size - 1) // 2,  # Same padding (only exact for odd kernel sizes)
+                groups=self.decoder_dim  # Each decoder_dim feature mixes width channels independently
+            )
         
         # Optional residual connection (mixes width channels for each decoder_dim feature)
         self.w = nn.Conv1d(self.decoder_dim, self.decoder_dim, kernel_size=1, groups=self.decoder_dim)
@@ -269,6 +288,13 @@ class MRBNOLiftV3Conv(nn.Module):
 
         self.D_in = self.C_in * self.N * self.M
         self.D_out = self.C_out * self.N * self.M
+
+        # Validate conv_kernel_size
+        if conv_kernel_size > width:
+            raise ValueError(
+                f"conv_kernel_size={conv_kernel_size} must be <= width={width}. "
+                f"The convolution kernel cannot be larger than the width dimension."
+            )
 
         # Optional coordinate embedding
         if self.use_coordinates:
