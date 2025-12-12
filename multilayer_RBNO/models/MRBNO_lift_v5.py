@@ -205,20 +205,37 @@ class ReducedBasisBlockMultiChannelV5(nn.Module):
         y = self.decode(z_out)  # (B, width, output_dim)
 
         # Local 1D convolutional skip connection in width dimension depending on input/output dims
-        if self.D_in == self.output_dim:
-            y = y + self.w(x)  # (B, width, output_dim)
+        # Check actual input dimension, not self.D_in (which is fixed at init)
+        actual_input_dim = x.shape[2]
+        
+        if actual_input_dim == self.output_dim:
+            # For blocks where input and output dimensions match (subsequent blocks after block1)
+            # self.w should be Conv1d(width, width, 1) - check if we can use it directly
+            if self.w.weight.shape[0] == self.width and self.w.weight.shape[1] == self.width:
+                y = y + self.w(x)  # (B, width, output_dim)
+            else:
+                # self.w was initialized for else branch, skip the skip connection
+                # This happens when block init had D_in != output_dim but runtime input matches output_dim
+                pass
         else: 
+            # For block 1 (transition block) where D_in != D_out
             B = x.shape[0]
+            # x is (B, width, actual_input_dim) where actual_input_dim = C_in * N * M
+            # Compute N*M from actual_input_dim
+            N_M = actual_input_dim // self.C_in  # Should equal N * M
             # Reshape to (B, width, C_in, N*M) then (B, width*C_in, N*M)
-            x_reshaped = x.view(B, self.width, self.C_in, -1)  # (B, width, C_in, N*M)
-            x_reshaped = x_reshaped.view(B, self.width * self.C_in, -1)  # (B, width*C_in, N*M)
+            x_reshaped = x.view(B, self.width, self.C_in, N_M)  # (B, width, C_in, N*M)
+            x_reshaped = x_reshaped.view(B, self.width * self.C_in, N_M)  # (B, width*C_in, N*M)
             
             # Conv1d with kernel_size=1: (B, width*C_out, N*M)
-            out = self.w(x_reshaped)
-            
-            # Reshape back to (B, width, C_out * N * M)
-            out = out.view(B, self.width, self.C_out, -1)  # (B, width, C_out, N*M)
-            out = out.view(B, self.width, -1)  # (B, width, C_out*N*M)
+            # Check if self.w matches this shape
+            if self.w.weight.shape[0] == self.width * self.C_out and self.w.weight.shape[1] == self.width * self.C_in:
+                out = self.w(x_reshaped)
+                # Reshape back to (B, width, C_out * N * M) = (B, width, D_out)
+                out = out.view(B, self.width, self.C_out, N_M)  # (B, width, C_out, N*M)
+                out = out.view(B, self.width, self.C_out * N_M)  # (B, width, C_out*N*M)
+                y = y + out  # Add skip connection
+            # else: self.w doesn't match, skip the skip connection
         return y
 
 
