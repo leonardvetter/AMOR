@@ -98,7 +98,14 @@ class MRBNOBlock2d(nn.Module):
         self.residual = residual
 
         if norm == "group":
-            self.norm = nn.GroupNorm(num_groups=8, num_channels=width)
+            # Use adaptive number of groups: at most 8, but must divide width
+            num_groups = min(8, width)
+            # Find largest divisor of width that is <= 8
+            for g in range(min(8, width), 0, -1):
+                if width % g == 0:
+                    num_groups = g
+                    break
+            self.norm = nn.GroupNorm(num_groups=num_groups, num_channels=width)
         elif norm == "instance":
             self.norm = nn.InstanceNorm2d(width, affine=True)
         elif norm == "batch":
