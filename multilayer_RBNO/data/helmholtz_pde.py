@@ -298,3 +298,127 @@ def setup_helmholtz_problem(settings):
     observable = hf.LinearStateObservable(pde, B)
 
     return Vh, pde, prior, observable
+
+
+def extract_to_grid(func, box, nx, ny):
+    """
+    Extract function values and interpolate to regular grid on physical domain.
+    Returns 2D numpy array of shape (ny, nx).
+    """
+    x_min, x_max = box[0], box[2]
+    y_min, y_max = box[1], box[3]
+    
+    x_coords = np.linspace(x_min, x_max, nx)
+    y_coords = np.linspace(y_min, y_max, ny)
+    X, Y = np.meshgrid(x_coords, y_coords)
+    
+    grid = np.zeros((ny, nx))
+    
+    for i in range(ny):
+        for j in range(nx):
+            point = dl.Point(X[i, j], Y[i, j])
+            try:
+                grid[i, j] = func(point)
+            except:
+                grid[i, j] = 0.0
+    
+    return grid
+
+
+def extract_vector_to_grid(func, box, nx, ny):
+    """
+    Extract vector function values (real and imaginary parts) to regular grids.
+    Returns tuple (real_grid, imag_grid) both of shape (ny, nx).
+    """
+    u_real = func.sub(0)
+    u_imag = func.sub(1)
+    
+    real_grid = extract_to_grid(u_real, box, nx, ny)
+    imag_grid = extract_to_grid(u_imag, box, nx, ny)
+    
+    return real_grid, imag_grid
+
+
+if __name__ == "__main__":
+    import argparse
+    import os
+    
+    parser = argparse.ArgumentParser(description="Generate Helmholtz dataset")
+    parser.add_argument("--num_samples", type=int, default=1000,
+                        help="Number of samples to generate (default: 1000)")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Output directory (default: $SCRATCH/data/)")
+    args = parser.parse_args()
+    
+    num_samples = args.num_samples
+    if args.output_dir is None:
+        scratch_dir = os.environ.get('SCRATCH', '/tmp')
+        output_dir = os.path.join(scratch_dir, 'data')
+    else:
+        output_dir = args.output_dir
+    
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, 'helmholtz_dataset.npz')
+    
+    print(f"Generating {num_samples} Helmholtz samples...")
+    print(f"Output directory: {output_dir}")
+    print(f"Output file: {output_file}")
+    
+    settings = helmholtz_settings()
+    Vh, pde, prior, observable = setup_helmholtz_problem(settings)
+    
+    mesh = Vh[hp.PARAMETER].mesh()
+    box = [0., 0., 3., 3.]
+    nx = settings["nx"]
+    
+    print(f"Mesh: {nx}x{nx} grid")
+    print(f"Physical domain: {box}")
+    
+    m_dataset = []
+    u_real_dataset = []
+    u_imag_dataset = []
+    
+    np.random.seed(settings["seed"])
+    
+    for i in range(num_samples):
+        if (i + 1) % 100 == 0:
+            print(f"Progress: {i+1}/{num_samples}")
+        
+        m = prior.sample()
+        x = [None, m, None]
+        state = pde.generate_state()
+        pde.solveFwd(state, x)
+        
+        m_func = hp.vector2Function(m, Vh[hp.PARAMETER])
+        u_func = hp.vector2Function(state, Vh[hp.STATE])
+        
+        m_grid = extract_to_grid(m_func, box, nx, nx)
+        u_real_grid, u_imag_grid = extract_vector_to_grid(u_func, box, nx, nx)
+        
+        m_dataset.append(m_grid)
+        u_real_dataset.append(u_real_grid)
+        u_imag_dataset.append(u_imag_grid)
+    
+    m_dataset = np.array(m_dataset)
+    u_real_dataset = np.array(u_real_dataset)
+    u_imag_dataset = np.array(u_imag_dataset)
+    
+    print(f"\nDataset shapes:")
+    print(f"  m: {m_dataset.shape}")
+    print(f"  u_real: {u_real_dataset.shape}")
+    print(f"  u_imag: {u_imag_dataset.shape}")
+    
+    print(f"\nSaving dataset to {output_file}...")
+    np.savez_compressed(
+        output_file,
+        m=m_dataset,
+        u_real=u_real_dataset,
+        u_imag=u_imag_dataset,
+        nx=nx,
+        box=box,
+        num_samples=num_samples,
+        settings=settings
+    )
+    
+    file_size = os.path.getsize(output_file) / (1024**2)
+    print(f"Dataset saved successfully! File size: {file_size:.2f} MB")
