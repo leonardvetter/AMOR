@@ -10,14 +10,13 @@ from MRBNO_simple import PCAReducerMultiChannel
 
 class PCANet(nn.Module):
     """
-    PCA Net: A simple neural network that operates in PCA coefficient space.
+    PCA Net: Neural network that operates in PCA coefficient space.
     
     1. Encodes multi-channel input to PCA coefficients (using input PCA)
     2. Applies MLP transformation in coefficient space
     3. Decodes back to function space using output PCA
     
-    This is a simpler baseline compared to MRBNO, using a single MLP
-    instead of residual blocks.
+    Uses a single MLP instead of residual blocks.
     """
     
     def __init__(

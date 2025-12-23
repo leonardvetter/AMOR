@@ -210,7 +210,7 @@ class ReducedBasisBlockMultiChannelV5(nn.Module):
         
         if actual_input_dim == self.output_dim:
             # For blocks where input and output dimensions match (subsequent blocks after block1)
-            # self.w should be Conv1d(width, width, 1) - check if we can use it directly
+            # self.w is Conv1d(width, width, 1) - check if it can be used directly
             if self.w.weight.shape[0] == self.width and self.w.weight.shape[1] == self.width:
                 y = y + self.w(x)  # (B, width, output_dim)
             else:

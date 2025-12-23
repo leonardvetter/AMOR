@@ -276,7 +276,7 @@ class ReducedBasisBlockMultiChannelV3_Variant3_Optimized2(nn.Module):
             bias=False
         )
         
-        # Actually, better approach: reshape to (B*encoder_dim, width) and use Linear
+        # Reshape to (B*encoder_dim, width) and use Linear
         # But we want separate weights per mode, so use a large weight matrix
         # Or: use Conv1d with input_channels=encoder_dim, groups=encoder_dim
         # Input: (B, encoder_dim, width), each group processes one mode
@@ -298,7 +298,7 @@ class ReducedBasisBlockMultiChannelV3_Variant3_Optimized2(nn.Module):
         
         # Wait, kernel_size=1 means no width mixing. We need a full Linear layer.
         # So: Conv1d with kernel_size=width, but that's too large.
-        # Better: Use a weight matrix (encoder_dim, width, width) and matmul
+        # Use a weight matrix (encoder_dim, width, width) and matmul
         
         # Actually, the simplest: use a 3D weight and batched matmul
         self.width_weights = nn.Parameter(
@@ -312,7 +312,7 @@ class ReducedBasisBlockMultiChannelV3_Variant3_Optimized2(nn.Module):
         # Alternative: Use Conv1d with kernel_size=encoder_dim to transform modes
         # Input: (B, 1, encoder_dim*width), but that doesn't work
         
-        # Best: Keep 3D weight but use efficient matmul
+        # Keep 3D weight and use efficient matmul
         self.mode_weight = nn.Parameter(
             torch.randn(self.width, self.encoder_dim, self.decoder_dim) * 
             (1.0 / (self.width * self.encoder_dim))
@@ -498,11 +498,11 @@ class ReducedBasisBlockMultiChannelV3_Variant3_Optimized3(nn.Module):
         # Option: Use Conv1d with kernel_size=encoder_dim to transform all modes at once
         # But this doesn't allow width-dependent transformation
         
-        # Better: Use a 3D weight but apply it with Conv1d-like operations
+        # Use a 3D weight and apply it with Conv1d-like operations
         # Actually, keep the 3D weight but use efficient operations
         # OR: Use multiple Conv1d layers, one per width position (not ideal)
         
-        # Best compromise: Use Conv1d for mode transformation, but make it width-aware
+        # Use Conv1d for mode transformation with width-aware groups
         # Use kernel_size=encoder_dim to transform modes, but have width groups
         mode_kernel_size = mode_conv_kernel_size if mode_conv_kernel_size else self.encoder_dim
         

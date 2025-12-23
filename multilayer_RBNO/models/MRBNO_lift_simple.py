@@ -1,9 +1,7 @@
 """
-MRBNO Lift Simple: FNO-like architecture using PCA basis instead of Fourier basis.
+MRBNO Lift Simple: Architecture using PCA basis instead of Fourier basis.
 
-This model is designed to be as similar as possible to FNO, with the only major difference
-being the use of PCA encoding/decoding instead of Fourier transforms. All blocks are identical,
-and the skip/residual structure matches FNO exactly.
+Uses PCA encoding/decoding instead of Fourier transforms. Block structure and skip/residual connections are the same as FNO2d.
 """
 
 import numpy as np
@@ -85,10 +83,9 @@ class PCASpectralConv2d(nn.Module):
 
 class MRBNOBlock2d(nn.Module):
     """
-    MRBNO block, identical structure to FNOBlock2d.
+    MRBNO block with same structure as FNOBlock2d.
     
-    The only difference is using PCASpectralConv2d instead of SpectralConv2d.
-    Skip/residual structure matches FNO exactly.
+    Uses PCASpectralConv2d instead of SpectralConv2d. Skip/residual structure is the same as FNOBlock2d.
     """
     def __init__(self, width, n_modes, pca_components, pca_mean, norm="group", dropout_p=0.0, residual=True):
         super().__init__()
@@ -120,7 +117,7 @@ class MRBNOBlock2d(nn.Module):
         x: (B, width, H, W)
         returns: (B, width, H, W)
         """
-        # IDENTICAL TO FNO: spectral(x) + local(x) → norm → act → dropout → residual
+        # spectral(x) + local(x) → norm → act → dropout → residual
         y = self.spectral(x) + self.w(x)
         y = self.norm(y)
         y = self.act(y)              
@@ -130,10 +127,10 @@ class MRBNOBlock2d(nn.Module):
 
 class MRBNOLiftSimple(nn.Module):
     """
-    MRBNO Lift Simple: FNO-like architecture using PCA basis.
+    MRBNO Lift Simple: Architecture using PCA basis.
     
-    Structure is identical to FNO2d, with PCA encoding/decoding replacing Fourier transforms.
-    All blocks are identical, and skip/residual connections match FNO exactly.
+    Structure is the same as FNO2d, with PCA encoding/decoding replacing Fourier transforms.
+    All blocks have the same structure, and skip/residual connections are the same as FNO2d.
     
     Args:
         in_channels: Number of input channels
@@ -159,25 +156,25 @@ class MRBNOLiftSimple(nn.Module):
         self.width = width
         self.add_coords = add_coords
 
-        # IDENTICAL TO FNO: lifting layer
+        # Lifting layer (same as FNO2d)
         lift_in = in_channels + (2 if add_coords else 0)
         self.fc0 = nn.Conv2d(lift_in, width, kernel_size=1)
         
-        # IDENTICAL TO FNO: all blocks are identical
+        # Blocks (same structure as FNO2d)
         self.blocks = nn.ModuleList([
             MRBNOBlock2d(width, n_modes, pca_components, pca_mean, 
                         norm=norm, dropout_p=dropout_p, residual=residual)
             for _ in range(n_layers)
         ])
         
-        # IDENTICAL TO FNO: final projection layers
+        # Final projection layers (same as FNO2d)
         self.fc1 = nn.Conv2d(width, width, kernel_size=1)
         self.fc2 = nn.Conv2d(width, out_channels, kernel_size=1)
         self.act = nn.GELU()
 
     def _concat_coords(self, x):
         """
-        IDENTICAL TO FNO: coordinate concatenation.
+        Coordinate concatenation (same as FNO2d).
         x: (B,C,H,W)
         returns: (B,C+2,H,W)
         """
@@ -189,22 +186,15 @@ class MRBNOLiftSimple(nn.Module):
 
     def forward(self, x):
         """
-        IDENTICAL STRUCTURE TO FNO2d.forward
+        Forward pass (same structure as FNO2d.forward).
         x: (B, C_in, H, W)
         returns: (B, C_out, H, W)
         """
-        # Step 1: Optional coordinate concatenation (identical to FNO)
         if self.add_coords:
             x = self._concat_coords(x)
-        
-        # Step 2: Lifting (identical to FNO)
         x = self.fc0(x)
-
-        # Step 3: Process through blocks (identical to FNO)
         for blk in self.blocks:
             x = blk(x)
-
-        # Step 4: Final projection (identical to FNO)
         x = self.act(self.fc1(x))
         x = self.fc2(x)
         return x

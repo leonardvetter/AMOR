@@ -1,6 +1,5 @@
 """
-Fourier Neural Operator (FNO) for 2D problems
-Based on the implementation in poisson_FNO.ipynb
+Fourier Neural Operator (FNO) for 2D problems.
 """
 
 import torch
