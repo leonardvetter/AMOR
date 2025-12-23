@@ -386,7 +386,13 @@ if __name__ == "__main__":
         if (i + 1) % 100 == 0:
             print(f"Progress: {i+1}/{num_samples}")
         
-        m = prior.sample()
+        noise = dl.Vector()
+        prior.init_vector(noise, "noise")
+        noise.set_local(np.random.randn(noise.local_size()))
+        noise.apply("")
+        m = pde.generate_parameter()
+        prior.init_vector(m, 0)
+        prior.sample(noise, m)
         x = [None, m, None]
         state = pde.generate_state()
         pde.solveFwd(state, x)
