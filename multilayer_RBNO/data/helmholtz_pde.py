@@ -4,8 +4,10 @@
 import os, sys
 import dolfin as dl
 import numpy as np
-sys.path.append(os.environ.get('HIPPYLIB_PATH'))
-sys.path.append(os.environ.get('HIPPYFLOW_PATH'))
+if os.environ.get('HIPPYLIB_PATH'):
+    sys.path.append(os.environ.get('HIPPYLIB_PATH'))
+if os.environ.get('HIPPYFLOW_PATH'):
+    sys.path.append(os.environ.get('HIPPYFLOW_PATH'))
 import hippylib as hp
 import hippyflow as hf
 
