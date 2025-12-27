@@ -344,6 +344,7 @@ def extract_vector_to_grid(func, box, nx, ny):
 if __name__ == "__main__":
     import argparse
     import os
+    import sys
     
     parser = argparse.ArgumentParser(description="Generate Helmholtz dataset")
     parser.add_argument("--num_samples", type=int, default=1000,
@@ -362,11 +363,33 @@ if __name__ == "__main__":
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, 'helmholtz_dataset.npz')
     
-    print(f"Generating {num_samples} Helmholtz samples...")
+    settings = helmholtz_settings()
+    
+    start_idx = 0
+    if os.path.exists(output_file):
+        print(f"Existing dataset found at {output_file}")
+        try:
+            existing_data = np.load(output_file)
+            existing_samples = len(existing_data['m'])
+            print(f"Found {existing_samples} existing samples")
+            if existing_samples >= num_samples:
+                print(f"Dataset already complete ({existing_samples} >= {num_samples}). Exiting.")
+                sys.exit(0)
+            start_idx = existing_samples
+            print(f"Resuming from sample {start_idx}")
+        except Exception as e:
+            print(f"Warning: Could not load existing dataset ({e}). Starting from scratch.")
+            start_idx = 0
+    
+    if start_idx == 0:
+        print(f"Generating {num_samples} Helmholtz samples...")
+    else:
+        remaining = num_samples - start_idx
+        print(f"Generating {remaining} additional samples (will have {num_samples} total)...")
+    
     print(f"Output directory: {output_dir}")
     print(f"Output file: {output_file}")
     
-    settings = helmholtz_settings()
     Vh, pde, prior, observable = setup_helmholtz_problem(settings)
     
     mesh = Vh[hp.PARAMETER].mesh()
@@ -376,13 +399,20 @@ if __name__ == "__main__":
     print(f"Mesh: {nx}x{nx} grid")
     print(f"Physical domain: {box}")
     
-    m_dataset = []
-    u_real_dataset = []
-    u_imag_dataset = []
+    if start_idx == 0:
+        m_dataset = []
+        u_real_dataset = []
+        u_imag_dataset = []
+    else:
+        existing_data = np.load(output_file)
+        m_dataset = list(existing_data['m'])
+        u_real_dataset = list(existing_data['u_real'])
+        u_imag_dataset = list(existing_data['u_imag'])
+        existing_data.close()
     
-    np.random.seed(settings["seed"])
+    np.random.seed(settings["seed"] + start_idx)
     
-    for i in range(num_samples):
+    for i in range(start_idx, num_samples):
         if (i + 1) % 100 == 0:
             print(f"Progress: {i+1}/{num_samples}")
         
@@ -406,27 +436,26 @@ if __name__ == "__main__":
         m_dataset.append(m_grid)
         u_real_dataset.append(u_real_grid)
         u_imag_dataset.append(u_imag_grid)
+        
+        if (i + 1) % 10 == 0 or (i + 1) == num_samples:
+            current_num_samples = len(m_dataset)
+            print(f"Saving {current_num_samples} samples to {output_file}...")
+            np.savez_compressed(
+                output_file,
+                m=np.array(m_dataset),
+                u_real=np.array(u_real_dataset),
+                u_imag=np.array(u_imag_dataset),
+                nx=nx,
+                box=box,
+                num_samples=current_num_samples,
+                settings=settings
+            )
+            file_size = os.path.getsize(output_file) / (1024**2)
+            print(f"Dataset saved successfully! File size: {file_size:.2f} MB")
     
-    m_dataset = np.array(m_dataset)
-    u_real_dataset = np.array(u_real_dataset)
-    u_imag_dataset = np.array(u_imag_dataset)
+    print(f"\nFinal Dataset shapes:")
+    print(f"  m: {np.array(m_dataset).shape}")
+    print(f"  u_real: {np.array(u_real_dataset).shape}")
+    print(f"  u_imag: {np.array(u_imag_dataset).shape}")
     
-    print(f"\nDataset shapes:")
-    print(f"  m: {m_dataset.shape}")
-    print(f"  u_real: {u_real_dataset.shape}")
-    print(f"  u_imag: {u_imag_dataset.shape}")
-    
-    print(f"\nSaving dataset to {output_file}...")
-    np.savez_compressed(
-        output_file,
-        m=m_dataset,
-        u_real=u_real_dataset,
-        u_imag=u_imag_dataset,
-        nx=nx,
-        box=box,
-        num_samples=num_samples,
-        settings=settings
-    )
-    
-    file_size = os.path.getsize(output_file) / (1024**2)
-    print(f"Dataset saved successfully! File size: {file_size:.2f} MB")
+    print(f"\nDataset generation complete! Total samples: {len(m_dataset)}")
