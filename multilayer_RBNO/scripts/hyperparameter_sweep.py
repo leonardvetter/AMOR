@@ -37,7 +37,7 @@ from MRBNO_lift_v3 import MRBNOLiftV3
 
 class HyperparameterSweep:
     def __init__(self, data_path: str = 'data/nonlinear_diffusion_dataset.npz',
-                 output_dir: str = 'sweep_results', device: str = 'auto',
+                 output_dir: str = None, device: str = 'auto',
                  model_type: str = 'mrbno', seed: int = 42,
                  k_in: int = None, k_out: int = None, auto_k: bool = True):
         """
@@ -61,6 +61,11 @@ class HyperparameterSweep:
         self.auto_k = auto_k
         self.fixed_k_in = k_in
         self.fixed_k_out = k_out
+        
+        # Set output directory to SCRATCH/logs if not specified
+        if output_dir is None:
+            scratch_dir = os.environ.get('SCRATCH', '/tmp')
+            output_dir = os.path.join(scratch_dir, 'logs')
         
         # Set random seed if provided
         if seed is not None:
@@ -1053,8 +1058,8 @@ def main():
                        help='Dataset choice: small (data folder) or big ($SCRATCH)')
     parser.add_argument('--data_path', default=None,
                        help='Path to dataset (overrides --dataset if provided)')
-    parser.add_argument('--output_dir', default='sweep_results',
-                       help='Output directory for results')
+    parser.add_argument('--output_dir', default=None,
+                       help='Output directory for results (default: $SCRATCH/logs)')
     parser.add_argument('--max_configs', type=int, default=200,
                        help='Maximum configurations to test')
     parser.add_argument('--epochs', type=int, default=300,

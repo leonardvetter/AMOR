@@ -5,6 +5,7 @@ import math
 sys.path.insert(0, os.path.dirname(__file__))
 from helmholtz_pde import setup_helmholtz_problem, extract_to_grid, extract_vector_to_grid
 import dolfin as dl
+from mpi4py import MPI
 import hippylib as hp
 
 def helmholtz_settings_rough():
@@ -17,7 +18,7 @@ def helmholtz_settings_rough():
     settings["theta0"] = 1.0
     settings["theta1"] = 1.0
     settings["alpha"] = 0.25*math.pi
-    settings["comm_mesh"] = dl.MPI.COMM_SELF
+    settings["comm_mesh"] = MPI.COMM_SELF
     return settings
 
 if __name__ == "__main__":

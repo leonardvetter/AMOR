@@ -223,11 +223,16 @@ def main():
                         help='Gradient clipping norm')
     parser.add_argument('--early_stopping_patience', type=int, default=50,
                         help='Early stopping patience')
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
-                        help='Directory to save checkpoint')
+    parser.add_argument('--checkpoint_dir', type=str, default=None,
+                        help='Directory to save checkpoint (default: $SCRATCH/checkpoints)')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (cuda/cpu)')
     args = parser.parse_args()
+    
+    # Set checkpoint directory to SCRATCH if not specified
+    if args.checkpoint_dir is None:
+        scratch_dir = os.environ.get('SCRATCH', '/tmp')
+        args.checkpoint_dir = os.path.join(scratch_dir, 'checkpoints')
     
     # Setup device
     if args.device == 'cuda' and not torch.cuda.is_available():
