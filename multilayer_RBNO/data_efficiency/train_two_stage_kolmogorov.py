@@ -175,6 +175,24 @@ def load_kolmogorov_dataset(data_path):
     return (X_train, Y_train, X_val, Y_val, X_test, Y_test), (x_mean, x_std, y_mean, y_std)
 
 
+def sample_random_from_trajectories(data_path, fraction, seed=42):
+    """Randomly sample fraction of total pairs from all trajectories.
+    
+    Returns indices that can be used to index into the full dataset.
+    """
+    np.random.seed(seed)
+    data = np.load(data_path, mmap_mode='r')
+    num_trajectories = data.shape[0]
+    num_timesteps = data.shape[1] - 1
+    total_pairs = num_trajectories * num_timesteps
+    
+    n_samples = int(total_pairs * fraction)
+    indices = np.random.choice(total_pairs, size=n_samples, replace=False)
+    indices = np.sort(indices)
+    
+    return indices
+
+
 def compute_pca_coefficients(X, Y, rb, n_modes_in, n_modes_out):
     """Convert spatial data to PCA coefficients."""
     X_pca_list = []
@@ -299,6 +317,73 @@ def train_stage2(model, train_loader, val_loader, epochs, lr, device):
     return best_val_loss
 
 
+def train_stage2_unfrozen(model, train_loader, val_loader, epochs, lr, lr_blocks, device):
+    """Train Stage 2 model in real space with all parameters trainable.
+    
+    Blocks (PCA space parameters) use smaller learning rate lr_blocks.
+    Real-space layers (fc0, fc2) use learning rate lr.
+    """
+    model.to(device)
+    
+    block_params = []
+    real_space_params = []
+    for name, param in model.named_parameters():
+        if 'blocks' in name:
+            block_params.append(param)
+        else:
+            real_space_params.append(param)
+    
+    param_groups = [
+        {'params': block_params, 'lr': lr_blocks},
+        {'params': real_space_params, 'lr': lr}
+    ]
+    
+    optimizer = torch.optim.Adam(param_groups, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    criterion = nn.MSELoss()
+    
+    best_val_loss = float('inf')
+    best_epoch = 0
+    
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0.0
+        for xb, yb in train_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            pred = model(xb)
+            loss = criterion(pred, yb)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
+            optimizer.step()
+            train_loss += loss.item() * xb.size(0)
+        train_loss /= len(train_loader.dataset)
+        
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                pred = model(xb)
+                loss = criterion(pred, yb)
+                val_loss += loss.item() * xb.size(0)
+        val_loss /= len(val_loader.dataset)
+        
+        scheduler.step()
+        
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch
+        
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            lr_vals = scheduler.get_last_lr()
+            lr_block = lr_vals[0]
+            lr_real = lr_vals[1] if len(lr_vals) > 1 else lr_vals[0]
+            print(f"[Stage 2 Unfrozen Epoch {epoch+1:03d}/{epochs}] train={train_loss:.4e} val={val_loss:.4e} lr_real={lr_real:.2e} lr_blocks={lr_block:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
+    
+    return best_val_loss
+
+
 def main():
     parser = argparse.ArgumentParser(description='Two-stage training on Kolmogorov Flow')
     parser.add_argument('--data_path', type=str, default='$SCRATCH/data/2D_NS_Re500.npy',
@@ -367,8 +452,12 @@ def main():
     
     train_stage1(stage1_model, train_loader_pca, val_loader_pca, args.stage1_epochs, args.lr, device)
     
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-    stage1_path = os.path.join(args.checkpoint_dir, 'stage1_best.pt')
+    if args.checkpoint_dir is None:
+        checkpoint_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'checkpoints')
+    else:
+        checkpoint_dir = args.checkpoint_dir
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    stage1_path = os.path.join(checkpoint_dir, f'stage1_{args.stage1_epochs}epochs.pt')
     torch.save(stage1_model.state_dict(), stage1_path)
     print(f"Stage 1 checkpoint saved to {stage1_path}")
     
@@ -396,7 +485,12 @@ def main():
     
     train_stage2(stage2_model, train_loader_stage2, val_loader_stage2, args.stage2_epochs, args.lr, device)
     
-    stage2_path = os.path.join(args.checkpoint_dir, 'stage2_best.pt')
+    if args.checkpoint_dir is None:
+        checkpoint_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'checkpoints')
+    else:
+        checkpoint_dir = args.checkpoint_dir
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    stage2_path = os.path.join(checkpoint_dir, f'stage2_{args.stage2_epochs}epochs.pt')
     torch.save(stage2_model.state_dict(), stage2_path)
     print(f"Stage 2 checkpoint saved to {stage2_path}")
     

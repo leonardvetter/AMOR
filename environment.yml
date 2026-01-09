@@ -4,7 +4,7 @@ channels:
   - pytorch # PyTorch's channel for better package resolution
   - defaults
 dependencies:
-  - python=3.12 # this should be updated asa 3.13 is fully supported by torch (which does not seem to be the case of now)
+  - python=3.12
   - pytorch=2.7.1 
   - numpy
   - scipy

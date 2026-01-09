@@ -339,12 +339,18 @@ def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
     Y_test_t = torch.from_numpy(Y_test).float()
     
     # Create data loaders
+    # Use smaller batch size for Re5000 dataset to avoid OOM
+    batch_size = HYPERPARAMETERS['batch_size']
+    if 'Re5000' in dataset_name:
+        batch_size = 8
+        print(f"Using reduced batch size {batch_size} for Re5000 dataset")
+    
     train_loader = DataLoader(TensorDataset(X_train_t, Y_train_t), 
-                             batch_size=HYPERPARAMETERS['batch_size'], shuffle=True)
+                             batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(TensorDataset(X_val_t, Y_val_t), 
-                           batch_size=HYPERPARAMETERS['batch_size'], shuffle=False)
+                           batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(TensorDataset(X_test_t, Y_test_t), 
-                             batch_size=HYPERPARAMETERS['batch_size'], shuffle=False)
+                             batch_size=batch_size, shuffle=False)
     
     # Compute PCA (shared by all configurations)
     print("Computing PCA...")
@@ -392,6 +398,20 @@ def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
                 continue
             
             # Create model
+            # PCASpectralConv2d processes hidden representation with spatial dimensions (H, W)
+            # Use the PCA whose spatial dimensions match: (n_modes, H*W)
+            # - For Helmholtz: input has 1 channel -> input PCA is (n_modes, H*W) -> use input PCA
+            # - For nonlinear: output has 1 channel -> output PCA is (n_modes, H*W) -> use output PCA
+            # General rule: use PCA computed on data with same spatial dims as hidden representation
+            if in_channels == 1 and out_channels > 1:
+                # Input has single channel, output has multiple -> use input PCA
+                pca_components = rb.pca_in.components_
+                pca_mean = rb.pca_in.mean_
+            else:
+                # Otherwise use output PCA (matches spatial dims for single-channel output)
+                pca_components = rb.pca_out.components_
+                pca_mean = rb.pca_out.mean_
+            
             model = MRBNOLiftSimple(
                 in_channels=in_channels,
                 out_channels=out_channels,
@@ -402,8 +422,8 @@ def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
                 norm="group",
                 dropout_p=0.0,
                 residual=True,
-                pca_components=rb.pca_out.components_,
-                pca_mean=rb.pca_out.mean_
+                pca_components=pca_components,
+                pca_mean=pca_mean
             )
             
             num_params = sum(p.numel() for p in model.parameters())

@@ -118,6 +118,13 @@ def train_baseline(X_train, Y_train, X_val, Y_val, X_test, Y_test, rb, k_in, k_o
             print(f"[Baseline Epoch {epoch+1:03d}/{epochs}] train={train_loss:.4e} val={val_loss:.4e}")
     
     test_loss = evaluate_model(baseline_model, test_loader, device)
+    
+    checkpoint_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    baseline_checkpoint_path = os.path.join(checkpoint_dir, f'baseline_{epochs}epochs.pt')
+    torch.save(baseline_model.state_dict(), baseline_checkpoint_path)
+    print(f"Baseline checkpoint saved to {baseline_checkpoint_path}")
+    
     return baseline_model, test_loss
 
 
@@ -206,6 +213,12 @@ def main():
     
     train_stage1(stage1_model, train_loader_pca, val_loader_pca, args.stage1_epochs, args.lr, device)
     
+    checkpoint_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    stage1_checkpoint_path = os.path.join(checkpoint_dir, f'stage1_{args.stage1_epochs}epochs.pt')
+    torch.save(stage1_model.state_dict(), stage1_checkpoint_path)
+    print(f"\nStage 1 checkpoint saved to {stage1_checkpoint_path}")
+    
     print("\n" + "="*70)
     print("STAGE 2: Fine-tuning in real space")
     print("="*70)
@@ -229,6 +242,12 @@ def main():
     ), batch_size=args.batch_size, shuffle=False)
     
     train_stage2(stage2_model, train_loader_stage2, val_loader_stage2, args.stage2_epochs, args.lr, device)
+    
+    checkpoint_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    stage2_checkpoint_path = os.path.join(checkpoint_dir, f'stage2_{args.stage2_epochs}epochs.pt')
+    torch.save(stage2_model.state_dict(), stage2_checkpoint_path)
+    print(f"\nStage 2 checkpoint saved to {stage2_checkpoint_path}")
     
     print("\n" + "="*70)
     print("EVALUATION: Stage 2 model on test set")

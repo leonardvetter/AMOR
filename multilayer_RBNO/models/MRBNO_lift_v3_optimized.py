@@ -599,7 +599,7 @@ class ReducedBasisBlockMultiChannelV3_Variant3_Optimized3(nn.Module):
             z_width_t = torch.einsum("bei,eij->bej", z_t, self.width_weights)  # (B, encoder_dim, width)
             z_width = z_width_t.transpose(1, 2)  # (B, width, encoder_dim)
             
-            # Mode transformation: einsum is already efficient, but we could use matmul
+            # Mode transformation using einsum
             # z_width: (B, width, encoder_dim)
             # mode_weight: (width, encoder_dim, decoder_dim)
             z_out = torch.einsum("boi,oij->boj", z_width, self.mode_weight)  # (B, width, decoder_dim)

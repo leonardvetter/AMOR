@@ -37,6 +37,13 @@ def load_geofno_airfoil(data_dir: str) -> Tuple[np.ndarray, np.ndarray, np.ndarr
     y_file = os.path.join(data_dir, 'NACA_Cylinder_Y.npy')
     q_file = os.path.join(data_dir, 'NACA_Cylinder_Q.npy')
     
+    if not os.path.exists(x_file):
+        raise FileNotFoundError(f"Airfoil X file not found: {x_file}")
+    if not os.path.exists(y_file):
+        raise FileNotFoundError(f"Airfoil Y file not found: {y_file}")
+    if not os.path.exists(q_file):
+        raise FileNotFoundError(f"Airfoil Q file not found: {q_file}")
+    
     input_x = np.load(x_file)
     input_y = np.load(y_file)
     output_q = np.load(q_file)[:, 4]
@@ -61,44 +68,49 @@ def load_geofno_elasticity(data_dir: str) -> Tuple[np.ndarray, np.ndarray, np.nd
     Load Geo-FNO elasticity dataset.
     
     Elasticity data is on irregular mesh.
-    Input: rr (material properties) - (num_nodes, num_samples) -> (num_samples, num_nodes)
-    Output: sigma (stress) - (num_nodes, num_samples) -> (num_samples, num_nodes, 1)
-    Mesh: XY coordinates - (2, num_samples, num_nodes) -> (num_samples, num_nodes, 2)
-    
-    Note: Geo-FNO uses different mesh per sample, but we assume constant mesh
-    and use the first sample's mesh coordinates.
+    Input: xy (mesh coordinates) - (num_nodes, 2, num_samples) -> (num_samples, num_nodes, 2)
+    Output: sigma (stress) - (num_nodes, num_samples) -> (num_samples, num_nodes)
+    Note: rr (material properties, 42 values) is used as code parameter for geometry deformation,
+    not as input to the neural operator.
     
     Args:
         data_dir: Directory containing Random_UnitCell_*.npy files
         
     Returns:
-        data: Input data (num_samples, num_channels, num_nodes)
-        targets: Output data (num_samples, num_channels, num_nodes)
-        mesh_coords: Mesh coordinates (num_nodes, coord_dim) - from first sample
+        data: Input data (num_samples, num_channels, num_nodes) - mesh coordinates as channels
+        targets: Output data (num_samples, num_channels, num_nodes) - stress field
+        mesh_coords: Mesh coordinates (num_nodes, coord_dim) - constant across samples
     """
-    rr_file = os.path.join(data_dir, 'Random_UnitCell_rr_10.npy')
-    xy_file = os.path.join(data_dir, 'Random_UnitCell_XY_10.npy')
-    sigma_file = os.path.join(data_dir, 'Random_UnitCell_sigma_10.npy')
+    xy_files = [f for f in os.listdir(data_dir) if f.startswith('Random_UnitCell_XY') and f.endswith('.npy')]
+    sigma_files = [f for f in os.listdir(data_dir) if f.startswith('Random_UnitCell_sigma') and f.endswith('.npy')]
     
-    input_rr = np.load(rr_file)
+    if not xy_files or not sigma_files:
+        raise FileNotFoundError(f"Required elasticity files not found in {data_dir}. Need Random_UnitCell_XY*.npy, Random_UnitCell_sigma*.npy")
+    
+    xy_file = os.path.join(data_dir, xy_files[0])
+    sigma_file = os.path.join(data_dir, sigma_files[0])
+    
+    if len(xy_files) > 1 or len(sigma_files) > 1:
+        print(f"Warning: Multiple elasticity files found. Using: {xy_files[0]}, {sigma_files[0]}")
+    
     input_xy = np.load(xy_file)
     input_sigma = np.load(sigma_file)
     
-    input_rr = input_rr.T
     input_sigma = input_sigma.T
     input_xy = input_xy.transpose(2, 0, 1)
     
-    num_samples, num_nodes = input_rr.shape
+    num_samples, num_nodes, coord_dim = input_xy.shape
+    num_samples_sigma, num_nodes_sigma = input_sigma.shape
     
-    if input_sigma.ndim == 1:
-        input_sigma = input_sigma.reshape(num_samples, num_nodes)
-    elif input_sigma.ndim == 2:
-        if input_sigma.shape[0] != num_samples:
-            input_sigma = input_sigma.T
+    if num_samples != num_samples_sigma:
+        raise ValueError(f"Number of samples mismatch: xy has {num_samples}, sigma has {num_samples_sigma}")
+    
+    if num_nodes != num_nodes_sigma:
+        raise ValueError(f"Number of nodes mismatch: xy has {num_nodes}, sigma has {num_nodes_sigma}")
     
     mesh_coords = input_xy[0]
     
-    data = input_rr[:, np.newaxis, :]
+    data = input_xy.transpose(0, 2, 1)
     targets = input_sigma[:, np.newaxis, :]
     
     return data, targets, mesh_coords

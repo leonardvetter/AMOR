@@ -192,7 +192,7 @@ class MRBNOStage2(nn.Module):
     
     Uses pre-trained Stage 1 blocks (frozen) and adds fc0/fc2 for real-space I/O.
     """
-    def __init__(self, stage1_model, in_channels, out_channels, width, add_coords=False):
+    def __init__(self, stage1_model, in_channels, out_channels, width, add_coords=False, freeze_blocks=True):
         super().__init__()
         
         self.width = width
@@ -202,8 +202,9 @@ class MRBNOStage2(nn.Module):
         self.fc0 = nn.Conv2d(lift_in, width, kernel_size=1)
         
         self.blocks = stage1_model.blocks
-        for param in self.blocks.parameters():
-            param.requires_grad = False
+        if freeze_blocks:
+            for param in self.blocks.parameters():
+                param.requires_grad = False
         
         self.fc1 = nn.Conv2d(width, width, kernel_size=1)
         self.fc2 = nn.Conv2d(width, out_channels, kernel_size=1)

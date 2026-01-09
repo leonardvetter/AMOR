@@ -187,8 +187,10 @@ class MRBNOLiftIrregular(nn.Module):
         if self.add_coords:
             x = self._concat_coords(x)
         x = self.fc0(x)
+        
         for blk in self.blocks:
             x = blk(x)
+        
         x = self.act(self.fc1(x))
         x = self.fc2(x)
         return x

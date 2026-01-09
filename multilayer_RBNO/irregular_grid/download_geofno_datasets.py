@@ -100,20 +100,41 @@ def find_geofno_datasets(repo_path: str):
             }
             print(f"Found airfoil dataset in {naca_dir}")
     
+    diffeo_dir = os.path.join(data_dir, 'diffeo')
+    meshes_dir = os.path.join(data_dir, 'meshes')
+    omesh_dir = os.path.join(data_dir, 'omesh')
+    rmesh_dir = os.path.join(data_dir, 'rmesh')
+    interp_dir = os.path.join(data_dir, 'interp')
+    
+    elasticity_dirs = []
     if os.path.exists(diffeo_dir):
-        rr_file = os.path.join(diffeo_dir, 'Random_UnitCell_rr_10.npy')
-        xy_file = os.path.join(diffeo_dir, 'Random_UnitCell_XY_10.npy')
-        sigma_file = os.path.join(diffeo_dir, 'Random_UnitCell_sigma_10.npy')
+        elasticity_dirs.append(('diffeo', diffeo_dir))
+    if os.path.exists(meshes_dir):
+        elasticity_dirs.append(('meshes', meshes_dir))
+    if os.path.exists(omesh_dir):
+        elasticity_dirs.append(('omesh', omesh_dir))
+    if os.path.exists(rmesh_dir):
+        elasticity_dirs.append(('rmesh', rmesh_dir))
+    if os.path.exists(interp_dir):
+        elasticity_dirs.append(('interp', interp_dir))
+    
+    for dir_name, dir_path in elasticity_dirs:
+        rr_files = [f for f in os.listdir(dir_path) if f.startswith('Random_UnitCell_rr') and f.endswith('.npy') and 'Deform' not in f and 'Grid' not in f]
+        xy_files = [f for f in os.listdir(dir_path) if f.startswith('Random_UnitCell_XY') and f.endswith('.npy') and 'Deform' not in f and 'Grid' not in f]
+        sigma_files = [f for f in os.listdir(dir_path) if f.startswith('Random_UnitCell_sigma') and f.endswith('.npy') and 'Deform' not in f and 'Grid' not in f]
         
-        if all(os.path.exists(f) for f in [rr_file, xy_file, sigma_file]):
+        if rr_files and xy_files and sigma_files:
             datasets['elasticity'] = {
                 'type': 'elasticity',
-                'data_dir': diffeo_dir,
-                'input': rr_file,
-                'mesh_coords': xy_file,
-                'output': sigma_file
+                'data_dir': dir_path,
+                'input': os.path.join(dir_path, rr_files[0]),
+                'mesh_coords': os.path.join(dir_path, xy_files[0]),
+                'output': os.path.join(dir_path, sigma_files[0])
             }
-            print(f"Found elasticity dataset in {diffeo_dir}")
+            print(f"Found elasticity dataset in {dir_name}/ ({dir_path})")
+            if len(rr_files) > 1:
+                print(f"  Note: Multiple versions found. Available: {rr_files}")
+            break
     
     return datasets
 
@@ -152,18 +173,28 @@ def main():
             print(f"    python train_geofno.py --dataset_path {datasets['elasticity']['data_dir']} --dataset_type elasticity")
         else:
             print("Elasticity dataset: Not found")
-            print("  Expected files in data/diffeo/:")
+            print("  Expected files (base Geo-FNO model needs these exact names):")
             print("    - Random_UnitCell_rr_10.npy")
             print("    - Random_UnitCell_XY_10.npy")
             print("    - Random_UnitCell_sigma_10.npy")
+            print("  These files should be in one of these folders:")
+            print("    - data/diffeo/ (preferred)")
+            print("    - data/meshes/")
+            print("    - data/omesh/")
+            print("    - data/rmesh/")
+            print("    - data/interp/")
+            print("  Note: Other variants (Deform, Grid, interp) are for different model types.")
             print("  Download from: https://drive.google.com/drive/folders/1YBuaoTdOSr_qzaow-G-iwvbUI7fiUzu8?usp=sharing")
+            print("  Check which folder contains the base files (without 'Deform' or 'Grid' in the name).")
         
         if not datasets:
             print("\nNo datasets found. Datasets need to be downloaded from Google Drive:")
             print("  https://drive.google.com/drive/folders/1YBuaoTdOSr_qzaow-G-iwvbUI7fiUzu8?usp=sharing")
             print(f"\nAfter downloading, extract to: {repo_path}/data/")
             print("  - Airfoil data should go in: data/naca/")
-            print("  - Elasticity data should go in: data/diffeo/")
+            print("  - Elasticity data: Check which Google Drive folder contains:")
+            print("      Random_UnitCell_rr_10.npy, Random_UnitCell_XY_10.npy, Random_UnitCell_sigma_10.npy")
+            print("    Then extract that folder's contents to: data/diffeo/ (or create symlink)")
         
         return datasets
         
