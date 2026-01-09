@@ -2,6 +2,20 @@ import os
 import sys
 import numpy as np
 import math
+
+# Set environment variables before importing dolfin
+os.environ.setdefault('XDG_CACHE_HOME', os.path.join(os.environ.get('SCRATCH', '/tmp'), 'dolfin_cache'))
+os.environ.setdefault('DOLFIN_CACHE_DIR', os.path.join(os.environ.get('SCRATCH', '/tmp'), 'dolfin_cache'))
+os.makedirs(os.environ['XDG_CACHE_HOME'], exist_ok=True)
+
+# Set PYTHONPATH for hippylib and hippyflow
+if os.environ.get('HIPPYLIB_PATH'):
+    sys.path.insert(0, os.environ.get('HIPPYLIB_PATH'))
+if os.environ.get('HIPPYFLOW_PATH'):
+    sys.path.insert(0, os.environ.get('HIPPYFLOW_PATH'))
+if os.path.exists(os.path.join(os.environ.get('SCRATCH', '/tmp'), 'python_packages')):
+    sys.path.insert(0, os.path.join(os.environ.get('SCRATCH', '/tmp'), 'python_packages'))
+
 sys.path.insert(0, os.path.dirname(__file__))
 from helmholtz_pde import setup_helmholtz_problem, extract_to_grid, extract_vector_to_grid
 import dolfin as dl

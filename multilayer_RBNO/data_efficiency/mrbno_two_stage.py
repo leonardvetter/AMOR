@@ -122,10 +122,19 @@ class MRBNOStage1(nn.Module):
         self.H = H
         self.W = W
         
-        self.register_buffer('pca_components_in', torch.from_numpy(pca_components_in[:self.n_modes_in, :].astype(np.float32)))
-        self.register_buffer('pca_mean_in', torch.from_numpy(pca_mean_in.astype(np.float32)))
-        self.register_buffer('pca_components_out', torch.from_numpy(pca_components_out[:self.n_modes_out, :].astype(np.float32)))
-        self.register_buffer('pca_mean_out', torch.from_numpy(pca_mean_out.astype(np.float32)))
+        if pca_components_in.ndim == 3:
+            self.register_buffer('pca_components_in', torch.from_numpy(pca_components_in[:, :self.n_modes_in, :].astype(np.float32)))
+            self.register_buffer('pca_mean_in', torch.from_numpy(pca_mean_in.astype(np.float32)))
+        else:
+            self.register_buffer('pca_components_in', torch.from_numpy(pca_components_in[:self.n_modes_in, :].astype(np.float32)))
+            self.register_buffer('pca_mean_in', torch.from_numpy(pca_mean_in.astype(np.float32)))
+        
+        if pca_components_out.ndim == 3:
+            self.register_buffer('pca_components_out', torch.from_numpy(pca_components_out[:, :self.n_modes_out, :].astype(np.float32)))
+            self.register_buffer('pca_mean_out', torch.from_numpy(pca_mean_out.astype(np.float32)))
+        else:
+            self.register_buffer('pca_components_out', torch.from_numpy(pca_components_out[:self.n_modes_out, :].astype(np.float32)))
+            self.register_buffer('pca_mean_out', torch.from_numpy(pca_mean_out.astype(np.float32)))
         
         self.fc0_pca = nn.Conv2d(in_channels, width, kernel_size=1)
         
@@ -148,8 +157,16 @@ class MRBNOStage1(nn.Module):
         B = x_pca.shape[0]
         
         x_flat_pca = x_pca.view(B, self.in_channels, self.n_modes_in)
-        x_flat = torch.einsum('bcm,md->bcd', x_flat_pca, self.pca_components_in)
-        x_flat = x_flat + self.pca_mean_in.unsqueeze(0).unsqueeze(0)
+        if self.pca_components_in.ndim == 3:
+            x_flat_list = []
+            for c in range(self.in_channels):
+                x_flat_ch = torch.einsum('bm,md->bd', x_flat_pca[:, c, :], self.pca_components_in[c])
+                x_flat_ch = x_flat_ch + self.pca_mean_in[c].unsqueeze(0)
+                x_flat_list.append(x_flat_ch)
+            x_flat = torch.stack(x_flat_list, dim=1)
+        else:
+            x_flat = torch.einsum('bcm,md->bcd', x_flat_pca, self.pca_components_in)
+            x_flat = x_flat + self.pca_mean_in.unsqueeze(0).unsqueeze(0)
         x_spatial = x_flat.view(B, self.in_channels, self.H, self.W)
         
         return x_spatial
@@ -163,8 +180,16 @@ class MRBNOStage1(nn.Module):
         B = x_spatial.shape[0]
         
         x_flat = x_spatial.view(B, self.out_channels, self.H * self.W)
-        x_centered = x_flat - self.pca_mean_out.unsqueeze(0).unsqueeze(0)
-        x_pca = torch.einsum('bcd,md->bcm', x_centered, self.pca_components_out)
+        if self.pca_components_out.ndim == 3:
+            x_pca_list = []
+            for c in range(self.out_channels):
+                x_centered_ch = x_flat[:, c, :] - self.pca_mean_out[c].unsqueeze(0)
+                x_pca_ch = torch.einsum('bd,md->bm', x_centered_ch, self.pca_components_out[c])
+                x_pca_list.append(x_pca_ch)
+            x_pca = torch.stack(x_pca_list, dim=1)
+        else:
+            x_centered = x_flat - self.pca_mean_out.unsqueeze(0).unsqueeze(0)
+            x_pca = torch.einsum('bcd,md->bcm', x_centered, self.pca_components_out)
         
         return x_pca
         

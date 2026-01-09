@@ -22,15 +22,15 @@ def load_geofno_airfoil(data_dir: str) -> Tuple[np.ndarray, np.ndarray, np.ndarr
     Load Geo-FNO airfoil dataset.
     
     Airfoil data is on a regular grid, but we can extract it as point cloud.
-    Input: X and Y coordinates (num_samples, height, width, 2)
-    Output: Q field (num_samples, height, width)
+    Input: Q field channels 0-3 (field values) + X and Y coordinates
+    Output: Q field channel 4
     
     Args:
         data_dir: Directory containing NACA_Cylinder_*.npy files
         
     Returns:
-        data: Input data (num_samples, num_channels, num_nodes)
-        targets: Output data (num_samples, num_channels, num_nodes)
+        data: Input data (num_samples, num_channels, num_nodes) - Q channels 0-3 + X, Y coords
+        targets: Output data (num_samples, num_channels, num_nodes) - Q channel 4
         mesh_coords: Mesh coordinates (num_nodes, coord_dim) - constant across samples
     """
     x_file = os.path.join(data_dir, 'NACA_Cylinder_X.npy')
@@ -46,18 +46,23 @@ def load_geofno_airfoil(data_dir: str) -> Tuple[np.ndarray, np.ndarray, np.ndarr
     
     input_x = np.load(x_file)
     input_y = np.load(y_file)
-    output_q = np.load(q_file)[:, 4]
+    input_q = np.load(q_file)
+    output_q = input_q[:, 4]
     
     num_samples, height, width = input_x.shape
     
-    input_data = np.stack([input_x, input_y], axis=-1)
-    input_data = input_data.reshape(num_samples, height * width, 2)
+    input_q_fields = input_q[:, :4]
+    input_q_fields = input_q_fields.reshape(num_samples, 4, height * width)
+    
+    input_coords = np.stack([input_x, input_y], axis=-1)
+    input_coords = input_coords.reshape(num_samples, height * width, 2)
+    input_coords = input_coords.transpose(0, 2, 1)
     
     output_data = output_q.reshape(num_samples, height * width)
     
-    mesh_coords = input_data[0]
+    mesh_coords = np.stack([input_x[0], input_y[0]], axis=-1).reshape(height * width, 2)
     
-    data = input_data.transpose(0, 2, 1)
+    data = np.concatenate([input_q_fields, input_coords], axis=1)
     targets = output_data[:, np.newaxis, :]
     
     return data, targets, mesh_coords

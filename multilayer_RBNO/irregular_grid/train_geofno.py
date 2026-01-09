@@ -27,11 +27,13 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
     num_batches = 0
     
     for batch in dataloader:
-        if len(batch) == 3 and batch[2] is not None:
-            batch_data, batch_target, batch_material = batch
+        batch_data, batch_target, batch_material = batch
+        batch_data = batch_data.to(device)
+        batch_target = batch_target.to(device)
+        
+        if batch_material.shape[0] > 0 and batch_material.numel() > 1:
             batch_material = batch_material.to(device)
         else:
-            batch_data, batch_target = batch[:2]
             batch_material = None
         
         batch_data = batch_data.to(device)
@@ -57,11 +59,13 @@ def validate(model, dataloader, criterion, device):
     
     with torch.no_grad():
         for batch in dataloader:
-            if len(batch) == 3 and batch[2] is not None:
-                batch_data, batch_target, batch_material = batch
+            batch_data, batch_target, batch_material = batch
+            batch_data = batch_data.to(device)
+            batch_target = batch_target.to(device)
+            
+            if batch_material.shape[0] > 0 and batch_material.numel() > 1:
                 batch_material = batch_material.to(device)
             else:
-                batch_data, batch_target = batch[:2]
                 batch_material = None
             
             batch_data = batch_data.to(device)

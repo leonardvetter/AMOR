@@ -55,7 +55,8 @@ class IrregularGridDataset(Dataset):
         if self.material_props is not None:
             return self.data[idx], self.targets[idx], self.material_props[idx]
         else:
-            return self.data[idx], self.targets[idx], None
+            dummy_material = torch.zeros(1, dtype=torch.float32)
+            return self.data[idx], self.targets[idx], dummy_material
 
 
 def compute_pca_for_model(data: np.ndarray, n_modes: int = 256, 

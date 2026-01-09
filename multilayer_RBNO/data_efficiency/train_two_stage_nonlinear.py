@@ -23,14 +23,14 @@ from mrbno_two_stage import MRBNOStage1, MRBNOStage2
 
 
 class PCAReducerMultiChannel:
-    """Fit PCA bases for input/output tensors."""
+    """Fit PCA bases for input/output tensors, computing PCA per channel."""
     
     def __init__(self, svd_solver="auto", whiten=False, random_state=None):
         self.svd_solver = svd_solver
         self.whiten = whiten
         self.random_state = random_state
-        self.pca_in = None
-        self.pca_out = None
+        self.pca_in_channels = None
+        self.pca_out_channels = None
         self.n_channels = None
         self.out_channels = None
         self.shape_ = None
@@ -41,7 +41,6 @@ class PCAReducerMultiChannel:
         num_samples, c_in, n, m = samples.shape
         self.n_channels = c_in
         self.shape_ = (n, m)
-        x_in = samples.reshape(num_samples, -1).astype(np.float32, copy=False)
         
         if solution.ndim == 3:
             solution = solution[:, None, :, :]
@@ -51,12 +50,21 @@ class PCAReducerMultiChannel:
         if (n_out, m_out) != (n, m):
             raise ValueError("Input and output spatial dimensions must match")
         self.out_channels = c_out
-        y_out = solution.reshape(num_samples, -1).astype(np.float32, copy=False)
         
-        self.pca_in = PCA(n_components=None, svd_solver=self.svd_solver, 
-                          whiten=self.whiten, random_state=self.random_state).fit(x_in)
-        self.pca_out = PCA(n_components=None, svd_solver=self.svd_solver, 
-                           whiten=self.whiten, random_state=self.random_state).fit(y_out)
+        self.pca_in_channels = []
+        for c in range(c_in):
+            x_channel = samples[:, c, :, :].reshape(num_samples, -1).astype(np.float32, copy=False)
+            pca_ch = PCA(n_components=None, svd_solver=self.svd_solver,
+                        whiten=self.whiten, random_state=self.random_state).fit(x_channel)
+            self.pca_in_channels.append(pca_ch)
+        
+        self.pca_out_channels = []
+        for c in range(c_out):
+            y_channel = solution[:, c, :, :].reshape(num_samples, -1).astype(np.float32, copy=False)
+            pca_ch = PCA(n_components=None, svd_solver=self.svd_solver,
+                        whiten=self.whiten, random_state=self.random_state).fit(y_channel)
+            self.pca_out_channels.append(pca_ch)
+        
         return self
     
     @staticmethod
@@ -64,31 +72,37 @@ class PCAReducerMultiChannel:
         return int(np.searchsorted(np.cumsum(evr), cutoff) + 1)
     
     def k_from_cutoff(self, j_in=0.99, j_out=0.99):
-        if self.pca_in is None or self.pca_out is None:
+        if self.pca_in_channels is None or self.pca_out_channels is None:
             raise ValueError("PCAReducer must be fitted before requesting cutoffs")
-        k_in = self._k_from_cutoff(self.pca_in.explained_variance_ratio_, j_in)
-        k_out = self._k_from_cutoff(self.pca_out.explained_variance_ratio_, j_out)
+        evr_in = np.mean([pca.explained_variance_ratio_ for pca in self.pca_in_channels], axis=0)
+        evr_out = np.mean([pca.explained_variance_ratio_ for pca in self.pca_out_channels], axis=0)
+        k_in = self._k_from_cutoff(evr_in, j_in)
+        k_out = self._k_from_cutoff(evr_out, j_out)
         return k_in, k_out
     
     @property
     def input_components(self):
-        if self.pca_in is None:
+        if self.pca_in_channels is None:
             raise ValueError("PCAReducer has not been fitted")
-        return self.pca_in.components_
+        return np.stack([pca.components_ for pca in self.pca_in_channels], axis=0)
     
     @property
     def output_components(self):
-        if self.pca_out is None:
+        if self.pca_out_channels is None:
             raise ValueError("PCAReducer has not been fitted")
-        return self.pca_out.components_
+        return np.stack([pca.components_ for pca in self.pca_out_channels], axis=0)
     
     @property
     def input_mean(self):
-        return self.pca_in.mean_
+        if self.pca_in_channels is None:
+            raise ValueError("PCAReducer has not been fitted")
+        return np.stack([pca.mean_ for pca in self.pca_in_channels], axis=0)
     
     @property
     def output_mean(self):
-        return self.pca_out.mean_
+        if self.pca_out_channels is None:
+            raise ValueError("PCAReducer has not been fitted")
+        return np.stack([pca.mean_ for pca in self.pca_out_channels], axis=0)
 
 
 def load_nonlinear_dataset(data_path):
@@ -146,7 +160,10 @@ def load_nonlinear_dataset(data_path):
 
 
 def compute_pca_coefficients(X, Y, rb, n_modes_in, n_modes_out):
-    """Convert spatial data to PCA coefficients."""
+    """Convert spatial data to PCA coefficients per channel."""
+    num_samples, n_channels, H, W = X.shape
+    _, out_channels, _, _ = Y.shape
+    
     X_pca_list = []
     Y_pca_list = []
     
@@ -155,23 +172,27 @@ def compute_pca_coefficients(X, Y, rb, n_modes_in, n_modes_out):
         X_batch = X[i:i+batch_size]
         Y_batch = Y[i:i+batch_size]
         
-        X_flat = X_batch.reshape(len(X_batch), -1)
-        Y_flat = Y_batch.reshape(len(Y_batch), -1)
+        X_pca_channels = []
+        for c in range(n_channels):
+            X_channel = X_batch[:, c, :, :].reshape(len(X_batch), -1)
+            X_channel_centered = X_channel - rb.pca_in_channels[c].mean_
+            X_pca_ch = X_channel_centered @ rb.pca_in_channels[c].components_[:n_modes_in].T
+            X_pca_channels.append(X_pca_ch)
+        X_pca_batch = np.stack(X_pca_channels, axis=1)
         
-        X_centered = X_flat - rb.input_mean
-        Y_centered = Y_flat - rb.output_mean
-        
-        X_pca_batch = X_centered @ rb.input_components[:n_modes_in].T
-        Y_pca_batch = Y_centered @ rb.output_components[:n_modes_out].T
+        Y_pca_channels = []
+        for c in range(out_channels):
+            Y_channel = Y_batch[:, c, :, :].reshape(len(Y_batch), -1)
+            Y_channel_centered = Y_channel - rb.pca_out_channels[c].mean_
+            Y_pca_ch = Y_channel_centered @ rb.pca_out_channels[c].components_[:n_modes_out].T
+            Y_pca_channels.append(Y_pca_ch)
+        Y_pca_batch = np.stack(Y_pca_channels, axis=1)
         
         X_pca_list.append(X_pca_batch)
         Y_pca_list.append(Y_pca_batch)
     
     X_pca = np.concatenate(X_pca_list, axis=0)
     Y_pca = np.concatenate(Y_pca_list, axis=0)
-    
-    X_pca = X_pca.reshape(len(X_pca), rb.n_channels, n_modes_in)
-    Y_pca = Y_pca.reshape(len(Y_pca), rb.out_channels, n_modes_out)
     
     return X_pca, Y_pca
 

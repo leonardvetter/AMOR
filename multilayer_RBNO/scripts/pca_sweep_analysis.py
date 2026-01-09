@@ -37,7 +37,7 @@ HYPERPARAMETERS = {
     'epochs': 300,
     'early_stopping_patience': 50,
     'early_stopping_min_delta': 0.0,
-    'batch_size': 32,
+    'batch_size': 16,
     'seed': 42,
     'train_frac': 0.7,
     'val_frac': 0.2,
