@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 from create_nonlinear_dataset import Gaussian, rbf_kernel, sample_gp_on_grid
 
-NUM_SAMPLES = 1000
+NUM_SAMPLES = 10000
 N = 100
 L = 1.0
 KEY = jax.random.PRNGKey(356)

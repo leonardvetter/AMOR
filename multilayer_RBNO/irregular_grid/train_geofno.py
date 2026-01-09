@@ -26,12 +26,19 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
     total_loss = 0.0
     num_batches = 0
     
-    for batch_data, batch_target in dataloader:
+    for batch in dataloader:
+        if len(batch) == 3 and batch[2] is not None:
+            batch_data, batch_target, batch_material = batch
+            batch_material = batch_material.to(device)
+        else:
+            batch_data, batch_target = batch[:2]
+            batch_material = None
+        
         batch_data = batch_data.to(device)
         batch_target = batch_target.to(device)
         
         optimizer.zero_grad()
-        output = model(batch_data)
+        output = model(batch_data, material_props=batch_material)
         loss = criterion(output, batch_target)
         loss.backward()
         optimizer.step()
@@ -49,11 +56,18 @@ def validate(model, dataloader, criterion, device):
     num_batches = 0
     
     with torch.no_grad():
-        for batch_data, batch_target in dataloader:
+        for batch in dataloader:
+            if len(batch) == 3 and batch[2] is not None:
+                batch_data, batch_target, batch_material = batch
+                batch_material = batch_material.to(device)
+            else:
+                batch_data, batch_target = batch[:2]
+                batch_material = None
+            
             batch_data = batch_data.to(device)
             batch_target = batch_target.to(device)
             
-            output = model(batch_data)
+            output = model(batch_data, material_props=batch_material)
             loss = criterion(output, batch_target)
             
             total_loss += loss.item()
@@ -73,8 +87,8 @@ def main():
                        help='Number of PCA modes (default: 144, equivalent to 12x12 in Geo-FNO)')
     parser.add_argument('--width', type=int, default=32,
                        help='Model width (default: 32, matches Geo-FNO)')
-    parser.add_argument('--n_layers', type=int, default=4,
-                       help='Number of layers (default: 4, Geo-FNO uses 5)')
+    parser.add_argument('--n_layers', type=int, default=5,
+                       help='Number of layers (default: 5, matches Geo-FNO)')
     parser.add_argument('--batch_size', type=int, default=20,
                        help='Batch size (default: 20, matches Geo-FNO)')
     parser.add_argument('--epochs', type=int, default=501,
@@ -96,6 +110,10 @@ def main():
                        help='Weight decay (default: 1e-4, matches Geo-FNO)')
     parser.add_argument('--add_coords', action='store_true', default=True,
                        help='Add coordinate channels as extra input channels (recommended for irregular grids)')
+    parser.add_argument('--use_grid_skip', action='store_true', default=False,
+                       help='Use grid-based skip connections (like Geo-FNO b layers)')
+    parser.add_argument('--use_input_skip', action='store_true', default=False,
+                       help='Use direct skip connection from input to output')
     parser.add_argument('--patience', type=int, default=50,
                        help='Early stopping patience (default: 50 epochs)')
     parser.add_argument('--min_delta', type=float, default=1e-6,
@@ -116,7 +134,7 @@ def main():
     device = torch.device(args.device)
     
     print("Loading dataset...")
-    datasets, mesh_coords = prepare_geofno_data(
+    datasets, mesh_coords, material_props = prepare_geofno_data(
         args.dataset_path,
         dataset_type=args.dataset_type,
         train_split=0.7,
@@ -127,6 +145,11 @@ def main():
     train_dataset = datasets['train']
     val_dataset = datasets['val']
     test_dataset = datasets['test']
+    
+    material_prop_dim = None
+    if material_props is not None:
+        material_prop_dim = material_props.shape[1]
+        print(f"Material properties loaded: {material_prop_dim} properties per sample")
     
     print("\nComputing PCA basis...")
     train_data_np = train_dataset.data.numpy()
@@ -145,12 +168,16 @@ def main():
         n_modes=min(args.n_modes, pca_components.shape[0]),
         n_layers=args.n_layers,
         add_coords=args.add_coords,
+        use_grid_skip=args.use_grid_skip,
+        use_input_skip=args.use_input_skip,
         norm="group",
         dropout_p=0.0,
         residual=True,
         pca_components=pca_components,
         pca_mean=pca_mean,
-        mesh_coords=mesh_coords
+        mesh_coords=mesh_coords,
+        material_prop_dim=material_prop_dim,
+        num_nodes=mesh_coords.shape[0]
     ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")

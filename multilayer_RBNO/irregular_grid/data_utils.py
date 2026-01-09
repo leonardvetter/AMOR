@@ -25,8 +25,10 @@ class IrregularGridDataset(Dataset):
         data: Input data of shape (num_samples, num_channels, num_nodes)
         targets: Target data of shape (num_samples, num_channels, num_nodes)
         mesh_coords: Mesh coordinates of shape (num_nodes, coord_dim)
+        material_props: Material properties of shape (num_samples, num_props) or None
     """
-    def __init__(self, data: np.ndarray, targets: np.ndarray, mesh_coords: np.ndarray):
+    def __init__(self, data: np.ndarray, targets: np.ndarray, mesh_coords: np.ndarray,
+                 material_props: Optional[np.ndarray] = None):
         if data.ndim == 2:
             data = data[:, np.newaxis, :]
         if targets.ndim == 2:
@@ -36,14 +38,24 @@ class IrregularGridDataset(Dataset):
         self.targets = torch.from_numpy(targets.astype(np.float32))
         self.mesh_coords = torch.from_numpy(mesh_coords.astype(np.float32))
         
+        if material_props is not None:
+            self.material_props = torch.from_numpy(material_props.astype(np.float32))
+        else:
+            self.material_props = None
+        
         assert data.shape[0] == targets.shape[0], "Data and targets must have same number of samples"
         assert data.shape[2] == targets.shape[2] == mesh_coords.shape[0], "Number of nodes must match"
+        if material_props is not None:
+            assert material_props.shape[0] == data.shape[0], "Material properties must have same number of samples as data"
         
     def __len__(self):
         return self.data.shape[0]
     
     def __getitem__(self, idx):
-        return self.data[idx], self.targets[idx]
+        if self.material_props is not None:
+            return self.data[idx], self.targets[idx], self.material_props[idx]
+        else:
+            return self.data[idx], self.targets[idx], None
 
 
 def compute_pca_for_model(data: np.ndarray, n_modes: int = 256, 

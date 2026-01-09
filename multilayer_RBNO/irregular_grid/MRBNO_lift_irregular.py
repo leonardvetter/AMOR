@@ -119,8 +119,10 @@ class MRBNOLiftIrregular(nn.Module):
         out_channels: Number of output channels
         width: Hidden dimension width
         n_modes: Number of PCA modes to keep
-        n_layers: Number of MRBNO blocks
+        n_layers: Number of MRBNO blocks (default: 5 to match Geo-FNO)
         add_coords: Whether to add coordinate channels
+        use_grid_skip: Whether to use grid-based skip connections (like Geo-FNO b layers)
+        use_input_skip: Whether to use direct skip connection from input to output
         norm: Normalization type ("group", "instance", "batch", or None)
         dropout_p: Dropout probability
         residual: Whether to use residual connections
@@ -128,9 +130,11 @@ class MRBNOLiftIrregular(nn.Module):
         pca_mean: PCA mean vector (N,) - numpy array
         mesh_coords: Mesh coordinates (N, 2) or (N, 3) - numpy array
     """
-    def __init__(self, in_channels=1, out_channels=1, width=32, n_modes=256, n_layers=3,
-                 add_coords=False, norm="group", dropout_p=0.0, residual=True,
-                 pca_components=None, pca_mean=None, mesh_coords=None):
+    def __init__(self, in_channels=1, out_channels=1, width=32, n_modes=256, n_layers=5,
+                 add_coords=False, use_grid_skip=False, use_input_skip=False,
+                 norm="group", dropout_p=0.0, residual=True,
+                 pca_components=None, pca_mean=None, mesh_coords=None,
+                 material_prop_dim=None, num_nodes=None):
         super().__init__()
         
         if pca_components is None or pca_mean is None:
@@ -139,8 +143,13 @@ class MRBNOLiftIrregular(nn.Module):
         if add_coords and mesh_coords is None:
             raise ValueError("mesh_coords must be provided when add_coords=True")
         
+        if use_grid_skip and mesh_coords is None:
+            raise ValueError("mesh_coords must be provided when use_grid_skip=True")
+        
         self.width = width
         self.add_coords = add_coords
+        self.use_grid_skip = use_grid_skip
+        self.use_input_skip = use_input_skip
         
         if mesh_coords is not None:
             mesh_coords = torch.from_numpy(mesh_coords.astype(np.float32))
@@ -149,13 +158,37 @@ class MRBNOLiftIrregular(nn.Module):
             else:
                 coord_dim = 1
                 mesh_coords = mesh_coords.unsqueeze(1)
-            self.register_buffer('mesh_coords', mesh_coords)  # (N, coord_dim)
+            
+            if use_grid_skip:
+                mesh_coords_min = mesh_coords.min(dim=0, keepdim=True)[0]
+                mesh_coords_max = mesh_coords.max(dim=0, keepdim=True)[0]
+                mesh_coords_range = mesh_coords_max - mesh_coords_min
+                mesh_coords_range = torch.clamp(mesh_coords_range, min=1e-8)
+                mesh_coords_normalized = (mesh_coords - mesh_coords_min) / mesh_coords_range
+            else:
+                mesh_coords_normalized = mesh_coords
+            
+            self.register_buffer('mesh_coords', mesh_coords_normalized)  # (N, coord_dim), normalized to [0,1] if use_grid_skip
             self.coord_dim = coord_dim
+            if num_nodes is None:
+                num_nodes = mesh_coords.shape[0]
         else:
             self.mesh_coords = None
             self.coord_dim = 0
+            if num_nodes is None:
+                raise ValueError("num_nodes must be provided when mesh_coords is None")
+        
+        self.num_nodes = num_nodes
+        self.material_prop_dim = material_prop_dim
+        
+        if material_prop_dim is not None and material_prop_dim > 0:
+            self.material_expand = nn.Linear(material_prop_dim, num_nodes)
+            material_channels = 1
+        else:
+            self.material_expand = None
+            material_channels = 0
 
-        lift_in = in_channels + (self.coord_dim if add_coords else 0)
+        lift_in = in_channels + (self.coord_dim if add_coords else 0) + material_channels
         self.fc0 = nn.Conv1d(lift_in, width, kernel_size=1)
         
         self.blocks = nn.ModuleList([
@@ -164,8 +197,22 @@ class MRBNOLiftIrregular(nn.Module):
             for _ in range(n_layers)
         ])
         
+        if use_grid_skip:
+            self.b_layers = nn.ModuleList([
+                nn.Conv1d(self.coord_dim, width, kernel_size=1)
+                for _ in range(n_layers + 1)
+            ])
+        else:
+            self.b_layers = None
+        
         self.fc1 = nn.Conv1d(width, width, kernel_size=1)
         self.fc2 = nn.Conv1d(width, out_channels, kernel_size=1)
+        
+        if use_input_skip:
+            self.input_skip = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+        else:
+            self.input_skip = None
+        
         self.act = nn.GELU()
 
     def _concat_coords(self, x):
@@ -177,20 +224,52 @@ class MRBNOLiftIrregular(nn.Module):
         B, _, N = x.shape
         coords = self.mesh_coords.T.unsqueeze(0).expand(B, -1, -1)  # (B, coord_dim, N)
         return torch.cat([x, coords], dim=1)
+    
+    def _get_grid_features(self, batch_size, device):
+        """
+        Get grid-based features from mesh coordinates (similar to Geo-FNO b layers).
+        Returns: (B, coord_dim, N) mesh coordinates as features
+        """
+        if self.mesh_coords is None:
+            return None
+        coords = self.mesh_coords.T.unsqueeze(0).expand(batch_size, -1, -1)  # (B, coord_dim, N)
+        return coords.to(device)
 
-    def forward(self, x):
+    def forward(self, x, material_props=None):
         """
         Forward pass.
         x: (B, C_in, N) - point cloud data
+        material_props: (B, material_prop_dim) - optional material properties
         returns: (B, C_out, N)
         """
+        x_input = x
+        
         if self.add_coords:
             x = self._concat_coords(x)
+        
+        if material_props is not None and self.material_expand is not None:
+            material_expanded = self.material_expand(material_props)  # (B, num_nodes)
+            material_expanded = material_expanded.unsqueeze(1)  # (B, 1, num_nodes)
+            x = torch.cat([x, material_expanded], dim=1)
+        
         x = self.fc0(x)
         
-        for blk in self.blocks:
+        if self.use_grid_skip:
+            grid_feat = self._get_grid_features(x.shape[0], x.device)
+            x = x + self.b_layers[0](grid_feat)
+            x = self.act(x)
+        
+        for i, blk in enumerate(self.blocks):
             x = blk(x)
+            if self.use_grid_skip:
+                grid_feat = self._get_grid_features(x.shape[0], x.device)
+                x = x + self.b_layers[i + 1](grid_feat)
         
         x = self.act(self.fc1(x))
         x = self.fc2(x)
+        
+        if self.use_input_skip:
+            x_skip = self.input_skip(x_input)
+            x = x + x_skip
+        
         return x

@@ -24,7 +24,7 @@ import jax.numpy as jnp
 # Configuration
 # ============================================================================
 
-NUM_SAMPLES = 1000      # Number of dataset samples
+NUM_SAMPLES = 10000      # Number of dataset samples
 N = 100                 # Grid resolution (NxN)
 L = 1.0                 # Domain size [0,L]^2
 SAVE_PATH = "nonlinear_diffusion_dataset.npz"  # Output file

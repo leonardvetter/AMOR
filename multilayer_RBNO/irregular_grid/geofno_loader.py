@@ -63,15 +63,14 @@ def load_geofno_airfoil(data_dir: str) -> Tuple[np.ndarray, np.ndarray, np.ndarr
     return data, targets, mesh_coords
 
 
-def load_geofno_elasticity(data_dir: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_geofno_elasticity(data_dir: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Load Geo-FNO elasticity dataset.
     
     Elasticity data is on irregular mesh.
     Input: xy (mesh coordinates) - (num_nodes, 2, num_samples) -> (num_samples, num_nodes, 2)
     Output: sigma (stress) - (num_nodes, num_samples) -> (num_samples, num_nodes)
-    Note: rr (material properties, 42 values) is used as code parameter for geometry deformation,
-    not as input to the neural operator.
+    Material properties: rr (42 values per sample) - used as input features
     
     Args:
         data_dir: Directory containing Random_UnitCell_*.npy files
@@ -80,9 +79,11 @@ def load_geofno_elasticity(data_dir: str) -> Tuple[np.ndarray, np.ndarray, np.nd
         data: Input data (num_samples, num_channels, num_nodes) - mesh coordinates as channels
         targets: Output data (num_samples, num_channels, num_nodes) - stress field
         mesh_coords: Mesh coordinates (num_nodes, coord_dim) - constant across samples
+        material_props: Material properties (num_samples, num_props) - optional, None if not found
     """
     xy_files = [f for f in os.listdir(data_dir) if f.startswith('Random_UnitCell_XY') and f.endswith('.npy')]
     sigma_files = [f for f in os.listdir(data_dir) if f.startswith('Random_UnitCell_sigma') and f.endswith('.npy')]
+    rr_files = [f for f in os.listdir(data_dir) if f.startswith('Random_UnitCell_rr') and f.endswith('.npy')]
     
     if not xy_files or not sigma_files:
         raise FileNotFoundError(f"Required elasticity files not found in {data_dir}. Need Random_UnitCell_XY*.npy, Random_UnitCell_sigma*.npy")
@@ -113,10 +114,21 @@ def load_geofno_elasticity(data_dir: str) -> Tuple[np.ndarray, np.ndarray, np.nd
     data = input_xy.transpose(0, 2, 1)
     targets = input_sigma[:, np.newaxis, :]
     
-    return data, targets, mesh_coords
+    material_props = None
+    if rr_files:
+        rr_file = os.path.join(data_dir, rr_files[0])
+        input_rr = np.load(rr_file)
+        input_rr = input_rr.T
+        if input_rr.shape[0] == num_samples:
+            material_props = input_rr
+            print(f"Loaded material properties (rr): shape {material_props.shape}")
+        else:
+            print(f"Warning: Material properties shape {input_rr.shape} doesn't match number of samples {num_samples}")
+    
+    return data, targets, mesh_coords, material_props
 
 
-def load_geofno_dataset(data_path: str, dataset_type: str = 'auto') -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_geofno_dataset(data_path: str, dataset_type: str = 'auto') -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Load Geo-FNO dataset from directory or file.
     
@@ -128,6 +140,7 @@ def load_geofno_dataset(data_path: str, dataset_type: str = 'auto') -> Tuple[np.
         data: Input data (num_samples, num_channels, num_nodes)
         targets: Output data (num_samples, num_channels, num_nodes)
         mesh_coords: Mesh coordinates (num_nodes, coord_dim)
+        material_props: Material properties (num_samples, num_props) or None
     """
     if dataset_type == 'auto':
         if 'naca' in data_path.lower() or 'airfoil' in data_path.lower():
@@ -138,7 +151,8 @@ def load_geofno_dataset(data_path: str, dataset_type: str = 'auto') -> Tuple[np.
             raise ValueError(f"Could not auto-detect dataset type from path: {data_path}")
     
     if dataset_type == 'airfoil':
-        return load_geofno_airfoil(data_path)
+        data, targets, mesh_coords = load_geofno_airfoil(data_path)
+        return data, targets, mesh_coords, None
     elif dataset_type == 'elasticity':
         return load_geofno_elasticity(data_path)
     else:
@@ -151,7 +165,7 @@ def prepare_geofno_data(data_path: str,
                         train_split: float = 0.7,
                         val_split: float = 0.2,
                         normalize: bool = True,
-                        random_seed: int = 42) -> Tuple[Dict, np.ndarray]:
+                        random_seed: int = 42) -> Tuple[Dict, np.ndarray, Optional[np.ndarray]]:
     """
     Prepare Geo-FNO dataset (airfoil or elasticity) for training.
     
@@ -177,7 +191,7 @@ def prepare_geofno_data(data_path: str,
     os.makedirs(output_dir, exist_ok=True)
     
     print(f"Loading Geo-FNO dataset from {data_path}...")
-    data, targets, mesh_coords = load_geofno_dataset(data_path, dataset_type)
+    data, targets, mesh_coords, material_props = load_geofno_dataset(data_path, dataset_type)
     
     print(f"Dataset loaded:")
     print(f"  Input shape: {data.shape}")
@@ -218,9 +232,13 @@ def prepare_geofno_data(data_path: str,
         
         print(f"Data normalized using training statistics")
     
-    train_dataset = IrregularGridDataset(data_train, targets_train, mesh_coords)
-    val_dataset = IrregularGridDataset(data_val, targets_val, mesh_coords)
-    test_dataset = IrregularGridDataset(data_test, targets_test, mesh_coords)
+    material_props_train = material_props[train_indices] if material_props is not None else None
+    material_props_val = material_props[val_indices] if material_props is not None else None
+    material_props_test = material_props[test_indices] if material_props is not None else None
+    
+    train_dataset = IrregularGridDataset(data_train, targets_train, mesh_coords, material_props_train)
+    val_dataset = IrregularGridDataset(data_val, targets_val, mesh_coords, material_props_val)
+    test_dataset = IrregularGridDataset(data_test, targets_test, mesh_coords, material_props_test)
     
     print(f"Dataset split:")
     print(f"  Train: {len(train_dataset)} samples")
@@ -231,4 +249,4 @@ def prepare_geofno_data(data_path: str,
         'train': train_dataset,
         'val': val_dataset,
         'test': test_dataset
-    }, mesh_coords
+    }, mesh_coords, material_props

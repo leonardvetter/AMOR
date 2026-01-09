@@ -17,10 +17,9 @@ from torch.utils.data import DataLoader, TensorDataset
 import argparse
 import psutil
 
-from train_two_stage_kolmogorov import (
-    load_kolmogorov_dataset, PCAReducerMultiChannel, 
-    compute_pca_coefficients, train_stage2, train_stage2_unfrozen,
-    sample_random_from_trajectories
+from train_two_stage_nonlinear import (
+    load_nonlinear_dataset, PCAReducerMultiChannel, 
+    compute_pca_coefficients, train_stage2, train_stage2_unfrozen
 )
 from mrbno_two_stage import MRBNOStage1, MRBNOStage2
 
@@ -45,10 +44,10 @@ def evaluate_model(model, test_loader, device):
     return total_loss / len(test_loader.dataset)
 
 
-def load_stage1_model(stage1_path, rb, k_in, k_out, H, W, width, n_layers, device):
+def load_stage1_model(stage1_path, rb, k_in, k_out, H, W, in_channels, out_channels, width, n_layers, device):
     """Load Stage 1 model from checkpoint."""
     stage1_model = MRBNOStage1(
-        in_channels=1, out_channels=1, width=width,
+        in_channels=in_channels, out_channels=out_channels, width=width,
         n_modes_in=k_in, n_modes_out=k_out, n_layers=n_layers, H=H, W=W,
         norm="group", dropout_p=0.0, residual=True,
         pca_components_in=rb.input_components, pca_mean_in=rb.input_mean,
@@ -61,7 +60,7 @@ def load_stage1_model(stage1_path, rb, k_in, k_out, H, W, width, n_layers, devic
 
 def main():
     parser = argparse.ArgumentParser(description='Stage 2 experiments')
-    parser.add_argument('--data_path', type=str, default='$SCRATCH/data/2D_NS_Re500.npy')
+    parser.add_argument('--data_path', type=str, default='$SCRATCH/data/nonlinear_diffusion_dataset_big.npz')
     parser.add_argument('--stage1_checkpoint', type=str, required=True, help='Path to Stage 1 checkpoint')
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--stage2_epochs', type=int, default=100)
@@ -88,8 +87,11 @@ def main():
     print("\n" + "="*70)
     print("LOADING DATASET")
     print("="*70)
-    (X_train, Y_train, X_val, Y_val, X_test, Y_test), norm_stats = load_kolmogorov_dataset(args.data_path)
+    (X_train, Y_train, X_val, Y_val, X_test, Y_test), norm_stats = load_nonlinear_dataset(args.data_path)
     H, W = X_train.shape[2], X_train.shape[3]
+    in_channels = X_train.shape[1]
+    out_channels = Y_train.shape[1]
+    print(f"Detected channels: in={in_channels}, out={out_channels}")
     
     print("\n" + "="*70)
     print("COMPUTING PCA")
@@ -103,7 +105,7 @@ def main():
     print("="*70)
     stage1_model = load_stage1_model(
         args.stage1_checkpoint, rb, k_in, k_out, H, W,
-        args.width, args.n_layers, device
+        in_channels, out_channels, args.width, args.n_layers, device
     )
     print(f"Stage 1 model loaded from {args.stage1_checkpoint}")
     
@@ -119,7 +121,7 @@ def main():
         print("EXPERIMENT 1: Stage 2 with frozen blocks (original)")
         print("="*70)
         
-        stage2_model_frozen = MRBNOStage2(stage1_model, in_channels=1, out_channels=1, 
+        stage2_model_frozen = MRBNOStage2(stage1_model, in_channels=in_channels, out_channels=out_channels, 
                                           width=args.width, add_coords=False, freeze_blocks=True)
         
         n_stage2_samples = min(1000, len(X_train))
@@ -156,7 +158,7 @@ def main():
         print("EXPERIMENT 2: Stage 2 with unfrozen blocks (small LR for blocks)")
         print("="*70)
         
-        stage2_model_unfrozen = MRBNOStage2(stage1_model, in_channels=1, out_channels=1, 
+        stage2_model_unfrozen = MRBNOStage2(stage1_model, in_channels=in_channels, out_channels=out_channels, 
                                            width=args.width, add_coords=False, freeze_blocks=False)
         
         n_stage2_samples = min(1000, len(X_train))
@@ -204,7 +206,7 @@ def main():
         print(f"Random sample: {len(X_train_random)} samples (1% of {len(X_train)})")
         print(f"Random sample shapes: X={X_train_random.shape}, Y={Y_train_random.shape}")
         
-        stage2_model_random = MRBNOStage2(stage1_model, in_channels=1, out_channels=1, 
+        stage2_model_random = MRBNOStage2(stage1_model, in_channels=in_channels, out_channels=out_channels, 
                                          width=args.width, add_coords=False, freeze_blocks=True)
         
         n_val_samples = min(200, len(X_val))
