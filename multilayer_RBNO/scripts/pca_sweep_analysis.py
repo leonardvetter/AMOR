@@ -42,7 +42,7 @@ HYPERPARAMETERS = {
     'train_frac': 0.7,
     'val_frac': 0.2,
     'test_frac': 0.1,
-    'num_samples': 1000,
+    'num_samples': 10000,
 }
 
 # Training schedule: CosineAnnealingLR scheduler

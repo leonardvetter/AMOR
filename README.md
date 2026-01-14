@@ -16,8 +16,9 @@ This repository implements several neural operator architectures:
 
 - **Input channels**: Handles arbitrary number via lifting layer `fc0` (Conv2d with `in_channels + 2*add_coords` input channels)
 - **Architecture**: Same structure as FNO2d (lifting → blocks → projection)
-- **PCA basis**: Single PCA basis shared across all blocks, processes hidden representation with spatial dimensions (H, W)
+- **PCA basis**: Single PCA basis shared for both encoding and decoding across all blocks, processes hidden representation with spatial dimensions (H, W)
 - **Key difference from FNO**: Uses PCA encoding/decoding instead of FFT/IFFT in spectral convolution blocks
+- **Note**: Uses the same PCA basis for input and output transformations (unlike MRBNO v3/v5 which use separate input/output bases)
 
 ### FNO
 
@@ -71,7 +72,7 @@ All training uses consistent hyperparameters:
 - **Loss**: Relative L1
 - **LR schedule**: CosineAnnealingLR (T_max=300, eta_min=0.0)
 - **Data split**: 0.7/0.2/0.1 (train/val/test)
-- **Samples**: 1000 per dataset
+- **Samples**: 10000 per dataset
 
 ## Directory Structure
 
@@ -83,7 +84,8 @@ multilayer_RBNO/
 │   ├── train_*.ipynb    # Training notebooks
 │   ├── complexity_analysis_mrbno.py  # Complexity analysis
 │   └── pca_sweep_analysis.py         # PCA parameter sweeps
-└── data_efficiency/     # Data efficiency experiments
+├── irregular_grid/      # MRBNO for irregular grids and point clouds (see irregular_grid/README.md)
+└── data_efficiency/     # Two-stage training experiments for data efficiency (see data_efficiency/README.md)
 ```
 
 ## Usage
@@ -168,5 +170,5 @@ conda activate test_fenics  # or appropriate environment with dolfin
 
 - MRBNO Lift Simple uses input PCA for Helmholtz (1 input channel, 2 output channels) and output PCA for nonlinear (2 input channels, 1 output channel) to match hidden representation spatial dimensions
 - All checkpoints and logs are saved to `$SCRATCH` to avoid home directory quota issues
-- Datasets are generated with 1000 samples by default, can be extended to 10k using provided scripts
+- Datasets are generated with 10000 samples by default
 

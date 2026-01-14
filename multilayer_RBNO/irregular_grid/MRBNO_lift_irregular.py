@@ -20,8 +20,10 @@ class PCASpectralConv1d(nn.Module):
     this does: encode to PCA → multiply in PCA space → decode.
     
     The PCA basis is computed once over the whole dataset and shared across all blocks.
+    Supports material-adaptive PCA basis transformation.
     """
-    def __init__(self, in_channels, out_channels, n_modes: int, pca_components, pca_mean):
+    def __init__(self, in_channels, out_channels, n_modes: int, pca_components, pca_mean, 
+                 material_adaptive=False, material_prop_dim=None, width=None):
         """
         Args:
             in_channels: Input channel dimension
@@ -29,6 +31,9 @@ class PCASpectralConv1d(nn.Module):
             n_modes: Number of PCA modes to keep
             pca_components: PCA components matrix (n_modes, N) - numpy array
             pca_mean: PCA mean vector (N,) - numpy array
+            material_adaptive: If True, use material-adaptive PCA basis
+            material_prop_dim: Material property dimension (required if material_adaptive=True)
+            width: Model width (required if material_adaptive=True)
         """
         super().__init__()
         self.in_channels = in_channels
@@ -43,24 +48,44 @@ class PCASpectralConv1d(nn.Module):
         self.register_buffer('pca_components', torch.from_numpy(pca_components[:self.n_modes, :].astype(np.float32)))
         self.register_buffer('pca_mean', torch.from_numpy(pca_mean.astype(np.float32)))
         
+        self.material_adaptive = material_adaptive
+        if material_adaptive:
+            if material_prop_dim is None or width is None:
+                raise ValueError("material_prop_dim and width required for material_adaptive=True")
+            self.material_pca_transform = nn.Sequential(
+                nn.Linear(material_prop_dim, width),
+                nn.GELU(),
+                nn.Linear(width, self.n_modes * self.n_modes)
+            )
+        else:
+            self.material_pca_transform = None
+        
         scale = 1.0 / (in_channels * out_channels)
         self.weight = nn.Parameter(
             torch.randn(in_channels, out_channels, self.n_modes) * scale
         )
     
-    def forward(self, x):
+    def forward(self, x, material_props=None):
         """
         x: (B, C_in, N) - point cloud data
+        material_props: (B, material_prop_dim) - optional material properties
         returns: (B, C_out, N)
         """
         B, C, N = x.shape
         
+        if self.material_adaptive and material_props is not None:
+            T_flat = self.material_pca_transform(material_props)  # (B, n_modes * n_modes)
+            T = T_flat.reshape(B, self.n_modes, self.n_modes)  # (B, n_modes, n_modes)
+            pca_components_adapted = torch.einsum('bmn,mk->bnk', T, self.pca_components)  # (B, n_modes, N)
+        else:
+            pca_components_adapted = self.pca_components.unsqueeze(0)  # (1, n_modes, N)
+        
         x_centered = x - self.pca_mean.unsqueeze(0).unsqueeze(0)  # (B, C_in, N)
-        x_pca = torch.einsum('bcn,mn->bcm', x_centered, self.pca_components)  # (B, C_in, n_modes)
+        x_pca = torch.einsum('bcn,bmn->bcm', x_centered, pca_components_adapted)  # (B, C_in, n_modes)
         
         out_pca = torch.einsum('bcm,com->bom', x_pca, self.weight)  # (B, C_out, n_modes)
         
-        out_flat = torch.einsum('bom,mn->bon', out_pca, self.pca_components)  # (B, C_out, N)
+        out_flat = torch.einsum('bom,bmn->bon', out_pca, pca_components_adapted)  # (B, C_out, N)
         out_flat = out_flat + self.pca_mean.unsqueeze(0).unsqueeze(0)
         
         return out_flat
@@ -72,9 +97,13 @@ class MRBNOBlock1d(nn.Module):
     
     Uses PCASpectralConv1d instead of SpectralConv2d. Skip/residual structure is the same.
     """
-    def __init__(self, width, n_modes, pca_components, pca_mean, norm="group", dropout_p=0.0, residual=True):
+    def __init__(self, width, n_modes, pca_components, pca_mean, norm="group", dropout_p=0.0, residual=True,
+                 material_adaptive=False, material_prop_dim=None, width_for_pca=None):
         super().__init__()
-        self.spectral = PCASpectralConv1d(width, width, n_modes, pca_components, pca_mean)
+        self.spectral = PCASpectralConv1d(width, width, n_modes, pca_components, pca_mean,
+                                         material_adaptive=material_adaptive,
+                                         material_prop_dim=material_prop_dim,
+                                         width=width_for_pca)
         self.w = nn.Conv1d(width, width, kernel_size=1)
         self.act = nn.GELU()
         self.residual = residual
@@ -95,12 +124,13 @@ class MRBNOBlock1d(nn.Module):
 
         self.dropout = nn.Dropout(dropout_p) if dropout_p > 0 else nn.Identity()
 
-    def forward(self, x):
+    def forward(self, x, material_props=None):
         """
         x: (B, width, N)
+        material_props: (B, material_prop_dim) - optional material properties
         returns: (B, width, N)
         """
-        y = self.spectral(x) + self.w(x)
+        y = self.spectral(x, material_props=material_props) + self.w(x)
         y = self.norm(y)
         y = self.act(y)              
         y = self.dropout(y)
@@ -134,7 +164,8 @@ class MRBNOLiftIrregular(nn.Module):
                  add_coords=False, use_grid_skip=False, use_input_skip=False,
                  norm="group", dropout_p=0.0, residual=True,
                  pca_components=None, pca_mean=None, mesh_coords=None,
-                 material_prop_dim=None, num_nodes=None):
+                 material_prop_dim=None, num_nodes=None,
+                 use_multiplicative_conditioning=False, material_adaptive_pca=False):
         super().__init__()
         
         if pca_components is None or pca_mean is None:
@@ -150,6 +181,8 @@ class MRBNOLiftIrregular(nn.Module):
         self.add_coords = add_coords
         self.use_grid_skip = use_grid_skip
         self.use_input_skip = use_input_skip
+        self.use_multiplicative_conditioning = use_multiplicative_conditioning
+        self.material_adaptive_pca = material_adaptive_pca
         
         if mesh_coords is not None:
             mesh_coords = torch.from_numpy(mesh_coords.astype(np.float32))
@@ -182,10 +215,29 @@ class MRBNOLiftIrregular(nn.Module):
         self.material_prop_dim = material_prop_dim
         
         if material_prop_dim is not None and material_prop_dim > 0:
-            self.material_expand = nn.Linear(material_prop_dim, num_nodes)
-            material_channels = 1
+            self.use_material_conditioning = True
+            encoding_dim = width // 4
+            self.material_prop_dim = material_prop_dim
+            self.encoding_dim = encoding_dim
+            self.material_fc_code = nn.Linear(material_prop_dim, width)
+            encoded_dim = material_prop_dim * 2 * encoding_dim
+            self.material_fc_encoding = nn.Sequential(
+                nn.Linear(encoded_dim, encoding_dim * 4),
+                nn.GELU(),
+                nn.Linear(encoding_dim * 4, width)
+            )
+            B_freqs = np.pi * np.power(2.0, np.arange(0, encoding_dim, dtype=np.float32))
+            self.register_buffer('material_B', torch.from_numpy(B_freqs).reshape(1, 1, -1))
+            self.material_lift_bias = nn.Parameter(torch.zeros(width, 1))
+            self.material_lift_scale = nn.Parameter(torch.ones(width, 1))
+            material_channels = 0
         else:
-            self.material_expand = None
+            self.use_material_conditioning = False
+            self.material_fc_code = None
+            self.material_fc_encoding = None
+            self.material_B = None
+            self.material_lift_bias = None
+            self.material_lift_scale = None
             material_channels = 0
 
         lift_in = in_channels + (self.coord_dim if add_coords else 0) + material_channels
@@ -193,7 +245,10 @@ class MRBNOLiftIrregular(nn.Module):
         
         self.blocks = nn.ModuleList([
             MRBNOBlock1d(width, n_modes, pca_components, pca_mean, 
-                        norm=norm, dropout_p=dropout_p, residual=residual)
+                        norm=norm, dropout_p=dropout_p, residual=residual,
+                        material_adaptive=material_adaptive_pca,
+                        material_prop_dim=material_prop_dim if material_adaptive_pca else None,
+                        width_for_pca=width if material_adaptive_pca else None)
             for _ in range(n_layers)
         ])
         
@@ -235,6 +290,29 @@ class MRBNOLiftIrregular(nn.Module):
         coords = self.mesh_coords.T.unsqueeze(0).expand(batch_size, -1, -1)  # (B, coord_dim, N)
         return coords.to(device)
 
+    def _compute_material_conditioning(self, material_props):
+        """
+        Compute material property conditioning features.
+        Uses multi-resolution positional encoding similar to IPHI.
+        
+        Args:
+            material_props: (B, material_prop_dim) - material properties
+            
+        Returns:
+            material_combined: (B, width, 1) - conditioning features
+        """
+        material_props = material_props.float()
+        material_code = self.material_fc_code(material_props)  # (B, width)
+        
+        material_sin = torch.sin(self.material_B * material_props.unsqueeze(-1))  # (B, material_prop_dim, encoding_dim)
+        material_cos = torch.cos(self.material_B * material_props.unsqueeze(-1))  # (B, material_prop_dim, encoding_dim)
+        material_encoded = torch.cat([material_sin, material_cos], dim=-1)  # (B, material_prop_dim, 2*encoding_dim)
+        material_encoded = material_encoded.flatten(1)  # (B, material_prop_dim * 2 * encoding_dim)
+        material_features = self.material_fc_encoding(material_encoded)  # (B, width)
+        
+        material_combined = (material_code + material_features).unsqueeze(-1)  # (B, width, 1)
+        return material_combined
+
     def forward(self, x, material_props=None):
         """
         Forward pass.
@@ -247,12 +325,14 @@ class MRBNOLiftIrregular(nn.Module):
         if self.add_coords:
             x = self._concat_coords(x)
         
-        if material_props is not None and self.material_expand is not None:
-            material_expanded = self.material_expand(material_props)  # (B, num_nodes)
-            material_expanded = material_expanded.unsqueeze(1)  # (B, 1, num_nodes)
-            x = torch.cat([x, material_expanded], dim=1)
-        
         x = self.fc0(x)
+        
+        material_conditioning = None
+        if material_props is not None and self.use_material_conditioning:
+            material_conditioning = self._compute_material_conditioning(material_props)  # (B, width, 1)
+            material_bias = self.material_lift_bias.unsqueeze(0)  # (1, width, 1)
+            material_scale = self.material_lift_scale.unsqueeze(0)  # (1, width, 1)
+            x = x * (1.0 + material_scale * material_conditioning) + material_bias * material_conditioning
         
         if self.use_grid_skip:
             grid_feat = self._get_grid_features(x.shape[0], x.device)
@@ -260,7 +340,12 @@ class MRBNOLiftIrregular(nn.Module):
             x = self.act(x)
         
         for i, blk in enumerate(self.blocks):
-            x = blk(x)
+            if material_conditioning is not None:
+                if self.use_multiplicative_conditioning:
+                    x = x * (1.0 + 0.5 * material_conditioning)
+                else:
+                    x = x + material_conditioning * 0.5
+            x = blk(x, material_props=material_props if self.material_adaptive_pca else None)
             if self.use_grid_skip:
                 grid_feat = self._get_grid_features(x.shape[0], x.device)
                 x = x + self.b_layers[i + 1](grid_feat)

@@ -1,10 +1,27 @@
 from fipy import Grid2D, CellVariable, DiffusionTerm, numerix as np
 import numpy as onp
 import os
-import jax
-import jax.numpy as jnp
 import sys
 sys.path.insert(0, os.path.dirname(__file__))
+
+# Patch numpy.asarray to handle JAX compatibility issue with NumPy 1.26.4
+_original_asarray = onp.asarray
+def _patched_asarray(a, dtype=None, copy=None, order=None, subok=False, ndmin=0):
+    kwargs = {}
+    if dtype is not None:
+        kwargs['dtype'] = dtype
+    if order is not None:
+        kwargs['order'] = order
+    if subok:
+        kwargs['subok'] = subok
+    if ndmin > 0:
+        kwargs['ndmin'] = ndmin
+    return _original_asarray(a, **kwargs)
+onp.asarray = _patched_asarray
+sys.modules['numpy'].asarray = _patched_asarray
+
+import jax
+import jax.numpy as jnp
 from create_nonlinear_dataset import Gaussian, rbf_kernel, sample_gp_on_grid
 
 NUM_SAMPLES = 10000

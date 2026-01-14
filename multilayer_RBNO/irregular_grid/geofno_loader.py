@@ -169,23 +169,30 @@ def prepare_geofno_data(data_path: str,
                         output_dir: Optional[str] = None,
                         train_split: float = 0.7,
                         val_split: float = 0.2,
-                        normalize: bool = True,
-                        random_seed: int = 42) -> Tuple[Dict, np.ndarray, Optional[np.ndarray]]:
+                        normalize: bool = False,
+                        random_seed: int = 42,
+                        use_geofno_split: bool = True) -> Tuple[Dict, np.ndarray, Optional[np.ndarray]]:
     """
     Prepare Geo-FNO dataset (airfoil or elasticity) for training.
+    
+    Uses fixed split matching Geo-FNO: first N for train, last M for test (elasticity)
+    or first N for train, next M for test (airfoil) when use_geofno_split=True.
     
     Args:
         data_path: Path to dataset directory (for airfoil/elasticity)
         dataset_type: 'airfoil', 'elasticity', or 'auto' (detect from path)
         output_dir: Directory to save processed data (default: $SCRATCH/data/geofno)
-        train_split: Fraction of data for training
-        val_split: Fraction of data for validation (test gets remainder)
-        normalize: Whether to normalize data using training statistics
-        random_seed: Random seed for train/val/test split
+        train_split: Fraction of data for training (ignored if use_geofno_split=True)
+        val_split: Fraction of data for validation (ignored if use_geofno_split=True)
+        normalize: Whether to normalize data using training statistics (default: False to match Geo-FNO)
+        random_seed: Random seed for train/val/test split (ignored if use_geofno_split=True)
+        use_geofno_split: If True, use Geo-FNO fixed split (first 1000 train, last 200 test for elasticity;
+                         first 1000 train, next 200 test for airfoil)
         
     Returns:
         data_dict: Dictionary with keys 'train', 'val', 'test' containing datasets
         mesh_coords: Mesh coordinates (num_nodes, coord_dim)
+        material_props: Material properties array or None
     """
     from data_utils import IrregularGridDataset
     
@@ -206,19 +213,36 @@ def prepare_geofno_data(data_path: str,
     print(f"  Number of nodes: {mesh_coords.shape[0]}")
     
     num_samples = data.shape[0]
-    indices = np.random.RandomState(random_seed).permutation(num_samples)
     
-    n_train = int(train_split * num_samples)
-    n_val = int(val_split * num_samples)
-    
-    train_indices = indices[:n_train]
-    val_indices = indices[n_train:n_train+n_val]
-    test_indices = indices[n_train+n_val:]
+    if use_geofno_split:
+        if dataset_type == 'elasticity':
+            ntrain = 1000
+            ntest = 200
+            train_indices = np.arange(ntrain)
+            test_indices = np.arange(num_samples - ntest, num_samples)
+            val_indices = np.arange(ntrain, num_samples - ntest)
+            print(f"Using Geo-FNO fixed split for elasticity: first {ntrain} train, last {ntest} test")
+        elif dataset_type == 'airfoil':
+            ntrain = 1000
+            ntest = 200
+            train_indices = np.arange(ntrain)
+            test_indices = np.arange(ntrain, ntrain + ntest)
+            val_indices = np.arange(ntrain + ntest, num_samples)
+            print(f"Using Geo-FNO fixed split for airfoil: first {ntrain} train, next {ntest} test")
+        else:
+            raise ValueError(f"Unknown dataset_type for Geo-FNO split: {dataset_type}")
+    else:
+        indices = np.random.RandomState(random_seed).permutation(num_samples)
+        n_train = int(train_split * num_samples)
+        n_val = int(val_split * num_samples)
+        train_indices = indices[:n_train]
+        val_indices = indices[n_train:n_train+n_val]
+        test_indices = indices[n_train+n_val:]
     
     data_train = data[train_indices]
     targets_train = targets[train_indices]
-    data_val = data[val_indices]
-    targets_val = targets[val_indices]
+    data_val = data[val_indices] if len(val_indices) > 0 else data_train[:0]
+    targets_val = targets[val_indices] if len(val_indices) > 0 else targets_train[:0]
     data_test = data[test_indices]
     targets_test = targets[test_indices]
     
@@ -229,29 +253,35 @@ def prepare_geofno_data(data_path: str,
         targets_std = targets_train.std(axis=(0, 2), keepdims=True) + 1e-8
         
         data_train = (data_train - data_mean) / data_std
-        data_val = (data_val - data_mean) / data_std
+        data_val = (data_val - data_mean) / data_std if len(val_indices) > 0 else data_val
         data_test = (data_test - data_mean) / data_std
         targets_train = (targets_train - targets_mean) / targets_std
-        targets_val = (targets_val - targets_mean) / targets_std
+        targets_val = (targets_val - targets_mean) / targets_std if len(val_indices) > 0 else targets_val
         targets_test = (targets_test - targets_mean) / targets_std
         
         print(f"Data normalized using training statistics")
+    else:
+        print(f"Data not normalized (matching Geo-FNO)")
     
     material_props_train = material_props[train_indices] if material_props is not None else None
-    material_props_val = material_props[val_indices] if material_props is not None else None
+    material_props_val = material_props[val_indices] if material_props is not None and len(val_indices) > 0 else None
     material_props_test = material_props[test_indices] if material_props is not None else None
     
     train_dataset = IrregularGridDataset(data_train, targets_train, mesh_coords, material_props_train)
-    val_dataset = IrregularGridDataset(data_val, targets_val, mesh_coords, material_props_val)
+    val_dataset = IrregularGridDataset(data_val, targets_val, mesh_coords, material_props_val) if len(val_indices) > 0 else None
     test_dataset = IrregularGridDataset(data_test, targets_test, mesh_coords, material_props_test)
     
     print(f"Dataset split:")
     print(f"  Train: {len(train_dataset)} samples")
-    print(f"  Val: {len(val_dataset)} samples")
+    if val_dataset is not None:
+        print(f"  Val: {len(val_dataset)} samples")
     print(f"  Test: {len(test_dataset)} samples")
     
-    return {
+    result_dict = {
         'train': train_dataset,
-        'val': val_dataset,
         'test': test_dataset
-    }, mesh_coords, material_props
+    }
+    if val_dataset is not None:
+        result_dict['val'] = val_dataset
+    
+    return result_dict, mesh_coords, material_props

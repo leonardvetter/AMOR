@@ -117,8 +117,16 @@ class MRBNOStage1(nn.Module):
         self.width = width
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.n_modes_in = min(n_modes_in, pca_components_in.shape[0])
-        self.n_modes_out = min(n_modes_out, pca_components_out.shape[0])
+        if pca_components_in.ndim == 3:
+            max_modes_in = pca_components_in.shape[1]
+        else:
+            max_modes_in = pca_components_in.shape[0]
+        if pca_components_out.ndim == 3:
+            max_modes_out = pca_components_out.shape[1]
+        else:
+            max_modes_out = pca_components_out.shape[0]
+        self.n_modes_in = min(n_modes_in, max_modes_in)
+        self.n_modes_out = min(n_modes_out, max_modes_out)
         self.H = H
         self.W = W
         

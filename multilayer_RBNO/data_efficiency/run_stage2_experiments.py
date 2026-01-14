@@ -19,7 +19,8 @@ import psutil
 
 from train_two_stage_nonlinear import (
     load_nonlinear_dataset, PCAReducerMultiChannel, 
-    compute_pca_coefficients, train_stage2, train_stage2_unfrozen
+    compute_pca_coefficients, train_stage2, train_stage2_unfrozen,
+    relative_l1_loss, relative_l2_error
 )
 from mrbno_two_stage import MRBNOStage1, MRBNOStage2
 
@@ -33,25 +34,30 @@ def get_memory_usage():
 def evaluate_model(model, test_loader, device):
     """Evaluate model on test set."""
     model.eval()
-    criterion = nn.MSELoss()
-    total_loss = 0.0
+    total_rel_l1 = 0.0
+    total_rel_l2 = 0.0
     with torch.no_grad():
         for xb, yb in test_loader:
             xb, yb = xb.to(device), yb.to(device)
             pred = model(xb)
-            loss = criterion(pred, yb)
-            total_loss += loss.item() * xb.size(0)
-    return total_loss / len(test_loader.dataset)
+            total_rel_l1 += relative_l1_loss(pred, yb).item() * xb.size(0)
+            total_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
+    return total_rel_l1 / len(test_loader.dataset), total_rel_l2 / len(test_loader.dataset)
 
 
 def load_stage1_model(stage1_path, rb, k_in, k_out, H, W, in_channels, out_channels, width, n_layers, device):
     """Load Stage 1 model from checkpoint."""
+    pca_components_in = rb.input_components
+    pca_mean_in = rb.input_mean
+    pca_components_out = rb.output_components[0] if rb.output_components.ndim == 3 else rb.output_components
+    pca_mean_out = rb.output_mean[0] if rb.output_mean.ndim == 2 else rb.output_mean
+    
     stage1_model = MRBNOStage1(
         in_channels=in_channels, out_channels=out_channels, width=width,
         n_modes_in=k_in, n_modes_out=k_out, n_layers=n_layers, H=H, W=W,
         norm="group", dropout_p=0.0, residual=True,
-        pca_components_in=rb.input_components, pca_mean_in=rb.input_mean,
-        pca_components_out=rb.output_components, pca_mean_out=rb.output_mean
+        pca_components_in=pca_components_in, pca_mean_in=pca_mean_in,
+        pca_components_out=pca_components_out, pca_mean_out=pca_mean_out
     )
     stage1_model.load_state_dict(torch.load(stage1_path, map_location=device))
     stage1_model.to(device)
@@ -149,9 +155,9 @@ def main():
         torch.save(stage2_model_frozen.state_dict(), checkpoint_path)
         print(f"Checkpoint saved to {checkpoint_path}")
         
-        test_loss_frozen = evaluate_model(stage2_model_frozen, test_loader, device)
-        results['frozen'] = test_loss_frozen
-        print(f"\nFrozen blocks test error: {test_loss_frozen:.6e}")
+        test_rel_l1_frozen, test_rel_l2_frozen = evaluate_model(stage2_model_frozen, test_loader, device)
+        results['frozen'] = (test_rel_l1_frozen, test_rel_l2_frozen)
+        print(f"\nFrozen blocks test error - rel L1: {test_rel_l1_frozen:.6e}, rel L2: {test_rel_l2_frozen:.6e}")
     
     if not args.skip_unfrozen:
         print("\n" + "="*70)
@@ -186,9 +192,9 @@ def main():
         torch.save(stage2_model_unfrozen.state_dict(), checkpoint_path)
         print(f"Checkpoint saved to {checkpoint_path}")
         
-        test_loss_unfrozen = evaluate_model(stage2_model_unfrozen, test_loader, device)
-        results['unfrozen'] = test_loss_unfrozen
-        print(f"\nUnfrozen blocks test error: {test_loss_unfrozen:.6e}")
+        test_rel_l1_unfrozen, test_rel_l2_unfrozen = evaluate_model(stage2_model_unfrozen, test_loader, device)
+        results['unfrozen'] = (test_rel_l1_unfrozen, test_rel_l2_unfrozen)
+        print(f"\nUnfrozen blocks test error - rel L1: {test_rel_l1_unfrozen:.6e}, rel L2: {test_rel_l2_unfrozen:.6e}")
     
     if not args.skip_random:
         print("\n" + "="*70)
@@ -232,15 +238,15 @@ def main():
         torch.save(stage2_model_random.state_dict(), checkpoint_path)
         print(f"Checkpoint saved to {checkpoint_path}")
         
-        test_loss_random = evaluate_model(stage2_model_random, test_loader, device)
-        results['random_1pct'] = test_loss_random
-        print(f"\nRandom 1% sample test error: {test_loss_random:.6e}")
+        test_rel_l1_random, test_rel_l2_random = evaluate_model(stage2_model_random, test_loader, device)
+        results['random_1pct'] = (test_rel_l1_random, test_rel_l2_random)
+        print(f"\nRandom 1% sample test error - rel L1: {test_rel_l1_random:.6e}, rel L2: {test_rel_l2_random:.6e}")
     
     print("\n" + "="*70)
     print("SUMMARY")
     print("="*70)
-    for exp_name, test_error in results.items():
-        print(f"{exp_name}: {test_error:.6e}")
+    for exp_name, (test_rel_l1, test_rel_l2) in results.items():
+        print(f"{exp_name}: rel L1={test_rel_l1:.6e}, rel L2={test_rel_l2:.6e}")
     print("="*70)
 
 

@@ -16,6 +16,23 @@ import numpy as onp
 import matplotlib.pyplot as plt
 from typing import Tuple
 import os
+import sys
+
+# Patch numpy.asarray to handle JAX compatibility issue with NumPy 1.26.4
+_original_asarray = onp.asarray
+def _patched_asarray(a, dtype=None, copy=None, order=None, subok=False, ndmin=0):
+    kwargs = {}
+    if dtype is not None:
+        kwargs['dtype'] = dtype
+    if order is not None:
+        kwargs['order'] = order
+    if subok:
+        kwargs['subok'] = subok
+    if ndmin > 0:
+        kwargs['ndmin'] = ndmin
+    return _original_asarray(a, **kwargs)
+onp.asarray = _patched_asarray
+sys.modules['numpy'].asarray = _patched_asarray
 
 import jax
 import jax.numpy as jnp
@@ -27,9 +44,13 @@ import jax.numpy as jnp
 NUM_SAMPLES = 10000      # Number of dataset samples
 N = 100                 # Grid resolution (NxN)
 L = 1.0                 # Domain size [0,L]^2
-SAVE_PATH = "nonlinear_diffusion_dataset.npz"  # Output file
+scratch = os.environ.get('SCRATCH', '/tmp')
+output_dir = os.path.join(scratch, 'data')
+os.makedirs(output_dir, exist_ok=True)
+SAVE_PATH = os.path.join(output_dir, "nonlinear_diffusion_dataset.npz")  # Output file
 
 # Random seed
+os.environ.setdefault('JAX_TRACEBACK_FILTERING', 'off')
 KEY = jax.random.PRNGKey(356)
 
 # Enable 64-bit precision for stability
@@ -104,44 +125,104 @@ xc, yc = mesh.cellCenters
 
 print(f"Mesh setup: {N}x{N} grid, dx={dx:.4f}")
 print(f"Number of cells: {mesh.numberOfCells}")
-print(f"Generating {NUM_SAMPLES} samples...")
+
+# Check for existing dataset
+start_idx = 0
+if os.path.exists(SAVE_PATH):
+    print(f"Existing dataset found at {SAVE_PATH}")
+    try:
+        existing_data = onp.load(SAVE_PATH)
+        existing_samples = len(existing_data['f'])
+        print(f"Found {existing_samples} existing samples")
+        if existing_samples >= NUM_SAMPLES:
+            print(f"Dataset already complete ({existing_samples} >= {NUM_SAMPLES}). Exiting.")
+            import sys
+            sys.exit(0)
+        start_idx = existing_samples
+        print(f"Resuming from sample {start_idx}")
+    except Exception as e:
+        print(f"Warning: Could not load existing dataset ({e}). Starting from scratch.")
+        start_idx = 0
+
+if start_idx == 0:
+    print(f"Generating {NUM_SAMPLES} samples...")
+else:
+    remaining = NUM_SAMPLES - start_idx
+    print(f"Generating {remaining} additional samples (will have {NUM_SAMPLES} total)...")
 
 # ============================================================================
 # Generate Dataset
 # ============================================================================
 
 # Storage arrays
-f_dataset = onp.zeros((NUM_SAMPLES, N, N))  # Source term
-m_dataset = onp.zeros((NUM_SAMPLES, N, N))  # Coefficient field
-u_dataset = onp.zeros((NUM_SAMPLES, N, N))  # Solution
+if start_idx == 0:
+    f_dataset = onp.zeros((NUM_SAMPLES, N, N))  # Source term
+    m_dataset = onp.zeros((NUM_SAMPLES, N, N))  # Coefficient field
+    u_dataset = onp.zeros((NUM_SAMPLES, N, N))  # Solution
+else:
+    existing_data = onp.load(SAVE_PATH)
+    existing_f = existing_data['f']
+    existing_m = existing_data['m']
+    existing_u = existing_data['u']
+    existing_data.close()
+    # Create new arrays with space for all samples
+    f_dataset = onp.zeros((NUM_SAMPLES, N, N))
+    m_dataset = onp.zeros((NUM_SAMPLES, N, N))
+    u_dataset = onp.zeros((NUM_SAMPLES, N, N))
+    # Copy existing data
+    f_dataset[:start_idx] = existing_f[:start_idx]
+    m_dataset[:start_idx] = existing_m[:start_idx]
+    u_dataset[:start_idx] = existing_u[:start_idx]
 
 # Sample f (source term) from GP
-print("\nSampling source term f from GP...")
-key, subkey = jax.random.split(KEY)
-f_samples, xs, ys = sample_gp_on_grid(
-    subkey, nx=N, ny=N,
-    variance=5.0, lengthscales=(0.2, 0.2),
-    jitter=1e-5, num_samples=NUM_SAMPLES
-)
-
-# Sample m (coefficient field) from GP
-print("Sampling coefficient field m from GP...")
-key, subkey = jax.random.split(key)
-m_samples, _, _ = sample_gp_on_grid(
-    subkey, nx=N, ny=N,
-    variance=1.0, lengthscales=(0.3, 0.3),  # Smoother than f
-    jitter=1e-5, num_samples=NUM_SAMPLES
-)
+if start_idx == 0:
+    print("\nSampling source term f from GP...")
+    key, subkey = jax.random.split(KEY)
+    f_samples, xs, ys = sample_gp_on_grid(
+        subkey, nx=N, ny=N,
+        variance=5.0, lengthscales=(0.2, 0.2),
+        jitter=1e-5, num_samples=NUM_SAMPLES
+    )
+    
+    # Sample m (coefficient field) from GP
+    print("Sampling coefficient field m from GP...")
+    key, subkey = jax.random.split(key)
+    m_samples, _, _ = sample_gp_on_grid(
+        subkey, nx=N, ny=N,
+        variance=1.0, lengthscales=(0.3, 0.3),  # Smoother than f
+        jitter=1e-5, num_samples=NUM_SAMPLES
+    )
+else:
+    # For resume, we need to regenerate samples starting from the correct key
+    print("\nSampling source term f from GP (resuming)...")
+    key = jax.random.PRNGKey(356)
+    # Advance key to start_idx
+    for _ in range(start_idx):
+        key, _ = jax.random.split(key)
+    key, subkey = jax.random.split(key)
+    f_samples, xs, ys = sample_gp_on_grid(
+        subkey, nx=N, ny=N,
+        variance=5.0, lengthscales=(0.2, 0.2),
+        jitter=1e-5, num_samples=NUM_SAMPLES - start_idx
+    )
+    
+    print("Sampling coefficient field m from GP (resuming)...")
+    key, subkey = jax.random.split(key)
+    m_samples, _, _ = sample_gp_on_grid(
+        subkey, nx=N, ny=N,
+        variance=1.0, lengthscales=(0.3, 0.3),
+        jitter=1e-5, num_samples=NUM_SAMPLES - start_idx
+    )
 
 # Solve for each sample
 print("\nSolving PDEs...")
-for i in range(NUM_SAMPLES):
+for i in range(start_idx, NUM_SAMPLES):
     if (i + 1) % 100 == 0:
         print(f"  Progress: {i+1}/{NUM_SAMPLES}")
     
     # Get f and m as numpy arrays
-    f_array = onp.array(f_samples[i])
-    m_array = onp.array(m_samples[i])
+    f_array = onp.array(f_samples[i - start_idx])
+    m_array = onp.array(m_samples[i - start_idx])
     
     # Store the inputs
     f_dataset[i] = f_array
@@ -169,6 +250,20 @@ for i in range(NUM_SAMPLES):
     # Store solution
     u_grid = u.value.reshape((N, N), order="C")
     u_dataset[i] = u_grid
+    
+    # Save periodically
+    if (i + 1) % 100 == 0 or (i + 1) == NUM_SAMPLES:
+        onp.savez_compressed(
+            SAVE_PATH,
+            f=f_dataset[:i+1],
+            m=m_dataset[:i+1],
+            u=u_dataset[:i+1],
+            N=N,
+            L=L,
+            num_samples=i+1
+        )
+        file_size = os.path.getsize(SAVE_PATH) / (1024**2)
+        print(f"  Saved {i+1} samples. File size: {file_size:.2f} MB")
 
 print(f"\nDataset generation complete!")
 print(f"  f shape: {f_dataset.shape}")
@@ -225,7 +320,7 @@ onp.savez_compressed(
     num_samples=NUM_SAMPLES
 )
 
-print(f"\nDataset saved successfully!")
+print(f"\nFinal dataset saved successfully!")
 print(f"File size: {os.path.getsize(SAVE_PATH) / (1024**2):.2f} MB")
 
 # ============================================================================

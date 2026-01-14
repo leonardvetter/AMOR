@@ -22,6 +22,24 @@ from sklearn.decomposition import PCA
 from mrbno_two_stage import MRBNOStage1, MRBNOStage2
 
 
+def relative_l1_loss(pred, target, eps=1e-8):
+    """Compute relative L1 loss: ||pred - target||_1 / ||target||_1"""
+    pred_flat = pred.view(pred.size(0), -1)
+    target_flat = target.view(target.size(0), -1)
+    diff = torch.abs(pred_flat - target_flat)
+    norm_target = torch.abs(target_flat)
+    return (diff.sum(dim=1) / (norm_target.sum(dim=1) + eps)).mean()
+
+
+def relative_l2_error(pred, target, eps=1e-8):
+    """Compute relative L2 error: ||pred - target||_2 / ||target||_2"""
+    pred_flat = pred.view(pred.size(0), -1)
+    target_flat = target.view(target.size(0), -1)
+    diff_norm = torch.norm(pred_flat - target_flat, dim=1)
+    target_norm = torch.norm(target_flat, dim=1)
+    return (diff_norm / (target_norm + eps)).mean().item()
+
+
 class PCAReducerMultiChannel:
     """Fit PCA bases for input/output tensors, computing PCA per channel."""
     
@@ -202,7 +220,6 @@ def train_stage1(model, train_loader, val_loader, epochs, lr, device):
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    criterion = nn.MSELoss()
     
     best_val_loss = float('inf')
     best_epoch = 0
@@ -210,26 +227,32 @@ def train_stage1(model, train_loader, val_loader, epochs, lr, device):
     for epoch in range(epochs):
         model.train()
         train_loss = 0.0
+        train_rel_l2 = 0.0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             pred = model(xb)
-            loss = criterion(pred, yb)
+            loss = relative_l1_loss(pred, yb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
             optimizer.step()
             train_loss += loss.item() * xb.size(0)
+            train_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
         train_loss /= len(train_loader.dataset)
+        train_rel_l2 /= len(train_loader.dataset)
         
         model.eval()
         val_loss = 0.0
+        val_rel_l2 = 0.0
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
-                loss = criterion(pred, yb)
+                loss = relative_l1_loss(pred, yb)
                 val_loss += loss.item() * xb.size(0)
+                val_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
         val_loss /= len(val_loader.dataset)
+        val_rel_l2 /= len(val_loader.dataset)
         
         scheduler.step()
         
@@ -238,7 +261,7 @@ def train_stage1(model, train_loader, val_loader, epochs, lr, device):
             best_epoch = epoch
         
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"[Stage 1 Epoch {epoch+1:03d}/{epochs}] train={train_loss:.4e} val={val_loss:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
+            print(f"[Stage 1 Epoch {epoch+1:03d}/{epochs}] train_rel_l1={train_loss:.4e} train_rel_l2={train_rel_l2:.4e} val_rel_l1={val_loss:.4e} val_rel_l2={val_rel_l2:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
     
     return best_val_loss
 
@@ -249,7 +272,6 @@ def train_stage2(model, train_loader, val_loader, epochs, lr, device):
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.Adam(trainable_params, lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    criterion = nn.MSELoss()
     
     best_val_loss = float('inf')
     best_epoch = 0
@@ -257,26 +279,32 @@ def train_stage2(model, train_loader, val_loader, epochs, lr, device):
     for epoch in range(epochs):
         model.train()
         train_loss = 0.0
+        train_rel_l2 = 0.0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             pred = model(xb)
-            loss = criterion(pred, yb)
+            loss = relative_l1_loss(pred, yb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=3.0)
             optimizer.step()
             train_loss += loss.item() * xb.size(0)
+            train_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
         train_loss /= len(train_loader.dataset)
+        train_rel_l2 /= len(train_loader.dataset)
         
         model.eval()
         val_loss = 0.0
+        val_rel_l2 = 0.0
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
-                loss = criterion(pred, yb)
+                loss = relative_l1_loss(pred, yb)
                 val_loss += loss.item() * xb.size(0)
+                val_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
         val_loss /= len(val_loader.dataset)
+        val_rel_l2 /= len(val_loader.dataset)
         
         scheduler.step()
         
@@ -285,7 +313,7 @@ def train_stage2(model, train_loader, val_loader, epochs, lr, device):
             best_epoch = epoch
         
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"[Stage 2 Epoch {epoch+1:03d}/{epochs}] train={train_loss:.4e} val={val_loss:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
+            print(f"[Stage 2 Epoch {epoch+1:03d}/{epochs}] train_rel_l1={train_loss:.4e} train_rel_l2={train_rel_l2:.4e} val_rel_l1={val_loss:.4e} val_rel_l2={val_rel_l2:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
     
     return best_val_loss
 
@@ -313,7 +341,6 @@ def train_stage2_unfrozen(model, train_loader, val_loader, epochs, lr, lr_blocks
     
     optimizer = torch.optim.Adam(param_groups, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    criterion = nn.MSELoss()
     
     best_val_loss = float('inf')
     best_epoch = 0
@@ -321,26 +348,32 @@ def train_stage2_unfrozen(model, train_loader, val_loader, epochs, lr, lr_blocks
     for epoch in range(epochs):
         model.train()
         train_loss = 0.0
+        train_rel_l2 = 0.0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             pred = model(xb)
-            loss = criterion(pred, yb)
+            loss = relative_l1_loss(pred, yb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
             optimizer.step()
             train_loss += loss.item() * xb.size(0)
+            train_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
         train_loss /= len(train_loader.dataset)
+        train_rel_l2 /= len(train_loader.dataset)
         
         model.eval()
         val_loss = 0.0
+        val_rel_l2 = 0.0
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
-                loss = criterion(pred, yb)
+                loss = relative_l1_loss(pred, yb)
                 val_loss += loss.item() * xb.size(0)
+                val_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
         val_loss /= len(val_loader.dataset)
+        val_rel_l2 /= len(val_loader.dataset)
         
         scheduler.step()
         
@@ -352,7 +385,7 @@ def train_stage2_unfrozen(model, train_loader, val_loader, epochs, lr, lr_blocks
             lr_vals = scheduler.get_last_lr()
             lr_block = lr_vals[0]
             lr_real = lr_vals[1] if len(lr_vals) > 1 else lr_vals[0]
-            print(f"[Stage 2 Unfrozen Epoch {epoch+1:03d}/{epochs}] train={train_loss:.4e} val={val_loss:.4e} lr_real={lr_real:.2e} lr_blocks={lr_block:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
+            print(f"[Stage 2 Unfrozen Epoch {epoch+1:03d}/{epochs}] train_rel_l1={train_loss:.4e} train_rel_l2={train_rel_l2:.4e} val_rel_l1={val_loss:.4e} val_rel_l2={val_rel_l2:.4e} lr_real={lr_real:.2e} lr_blocks={lr_block:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
     
     return best_val_loss
 
@@ -416,12 +449,17 @@ if __name__ == '__main__':
         torch.from_numpy(Y_val_pca).float()
     ), batch_size=args.batch_size, shuffle=False)
     
+    pca_components_in = rb.input_components
+    pca_mean_in = rb.input_mean
+    pca_components_out = rb.output_components[0] if rb.output_components.ndim == 3 else rb.output_components
+    pca_mean_out = rb.output_mean[0] if rb.output_mean.ndim == 2 else rb.output_mean
+    
     stage1_model = MRBNOStage1(
         in_channels=in_channels, out_channels=out_channels, width=args.width,
         n_modes_in=k_in, n_modes_out=k_out, n_layers=args.n_layers, H=H, W=W,
         norm="group", dropout_p=0.0, residual=True,
-        pca_components_in=rb.input_components, pca_mean_in=rb.input_mean,
-        pca_components_out=rb.output_components, pca_mean_out=rb.output_mean
+        pca_components_in=pca_components_in, pca_mean_in=pca_mean_in,
+        pca_components_out=pca_components_out, pca_mean_out=pca_mean_out
     )
     
     train_stage1(stage1_model, train_loader_pca, val_loader_pca, args.stage1_epochs, args.lr, device)

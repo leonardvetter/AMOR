@@ -1,6 +1,83 @@
 # Author: Liangha Cao, 10/15/2023
 # This document is ALMOST ENTIRELY based on the hippyflow helmhotz 2d problem.
 # Please cite hippyflow if you use this part of the code.
+
+# ============================================================================
+# DOLFIN Environment Configuration for JIT Compilation
+# ============================================================================
+# The following environment setup is required for DOLFIN to work correctly
+# with JIT (Just-In-Time) compilation on NERSC systems. All fixes are
+# implemented in the generation scripts (generate_helmholtz_*.py) and must
+# be applied BEFORE importing dolfin.
+#
+# STEP 1: Set cache directories to SCRATCH to avoid home directory quota issues:
+#    - XDG_CACHE_HOME: DOLFIN cache directory (set to $SCRATCH/dolfin_cache)
+#    - DOLFIN_CACHE_DIR: Alternative DOLFIN cache directory
+#    - Code: os.environ.setdefault('XDG_CACHE_HOME', os.path.join(scratch, 'dolfin_cache'))
+#    - Code: os.makedirs(os.environ['XDG_CACHE_HOME'], exist_ok=True)
+#    - This ensures all DOLFIN JIT compilation caches go to SCRATCH, not HOME
+#
+# STEP 2: Set PKG_CONFIG_PATH to find DOLFIN pkg-config file:
+#    - Required path: ~/.conda/envs/test_fenics/lib/pkgconfig
+#    - This allows DOLFIN's jit.py to locate dolfin.pc during import
+#    - Code: os.environ['PKG_CONFIG_PATH'] = conda_env_path + '/lib/pkgconfig'
+#    - Without this, DOLFIN import fails with "Could not find DOLFIN pkg-config file"
+#
+# STEP 3: Set LD_LIBRARY_PATH to find DOLFIN shared libraries:
+#    - Required path: ~/.conda/envs/test_fenics/lib
+#    - This ensures runtime linking works correctly for DOLFIN shared libraries
+#    - Code: os.environ['LD_LIBRARY_PATH'] = conda_env_path + '/lib'
+#    - Must be set before importing dolfin
+#
+# STEP 4: Set PYTHONPATH for hippylib and hippyflow:
+#    - HIPPYLIB_PATH: Path to hippylib installation (if set)
+#    - HIPPYFLOW_PATH: Path to hippyflow installation (if set)
+#    - $SCRATCH/python_packages: Alternative location for Python packages
+#    - Code: sys.path.insert(0, os.path.join(scratch, 'python_packages'))
+#    - Must be added to sys.path before importing dolfin or hippylib
+#
+# STEP 5: Set LIBRARY_PATH for linker to find libraries during compilation:
+#    - Required path: ~/.conda/envs/test_fenics/x86_64-conda-linux-gnu/sysroot/usr/lib64
+#    - This helps the linker find libraries in the conda sysroot
+#    - Code: os.environ['LIBRARY_PATH'] = sysroot_lib64 + (':' + current if current else '')
+#    - The linker uses LIBRARY_PATH in addition to -L flags
+#
+# STEP 6: Patch dijitso.build.make_compile_command to fix linker issues:
+#    - Issue: Linker looks for /usr/lib64/libmvec_nonshared.a which doesn't exist on system
+#    - Library exists in conda sysroot: ~/.conda/envs/test_fenics/x86_64-conda-linux-gnu/sysroot/usr/lib64/
+#    - Fix: Patch dijitso.build.make_compile_command with 4 strategies:
+#      1. Add -L flag for sysroot lib64 early in command (right after compiler)
+#      2. Add -Wl,--sysroot flag to make linker use conda sysroot as system root
+#         This makes /usr/lib64 resolve to sysroot/usr/lib64 automatically
+#      3. Replace any hardcoded /usr/lib64/libmvec_nonshared.a paths with sysroot path
+#      4. Add -Wl,--library-path flag as additional search path
+#    - Code: See generate_helmholtz_*.py for full patch implementation
+#    - The patch must be applied BEFORE importing dolfin (which triggers dijitso import)
+#    - The -Wl,--sysroot flag is the key fix that makes /usr/lib64 resolve correctly
+#
+# STEP 7: Ensure all large files (datasets, logs, checkpoints) go to SCRATCH:
+#    - Datasets: Save to $SCRATCH/data/ (not repository or HOME)
+#    - Logs: Save to $SCRATCH/logs/ (not repository or HOME)
+#    - Checkpoints: Save to $SCRATCH/checkpoints/ (not repository or HOME)
+#    - Code: output_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'data')
+#    - This prevents HOME directory quota issues and keeps repository clean
+#
+# STEP 8: Handle optional hippyflow import:
+#    - hippyflow is used for StateSpaceIdentityOperator and LinearStateObservable
+#    - If not available, minimal replacements are defined to allow code to run
+#    - Code: try/except ImportError with fallback class definitions
+#
+# FIX VERIFICATION:
+#    - The -Wl,--sysroot flag successfully fixes the linker issue
+#    - This makes the linker use conda sysroot as the system root, so /usr/lib64
+#      automatically resolves to sysroot/usr/lib64 where libmvec_nonshared.a exists
+#    - Tested and confirmed working - compilation succeeds and datasets can be generated
+#
+# IMPORTANT: All environment variables and patches must be set BEFORE importing dolfin.
+# The generation scripts (generate_helmholtz_*.py) implement all steps 1-6.
+# Step 7 is handled in the dataset generation logic itself.
+# ============================================================================
+
 import os, sys
 import dolfin as dl
 import numpy as np
@@ -9,7 +86,19 @@ if os.environ.get('HIPPYLIB_PATH'):
 if os.environ.get('HIPPYFLOW_PATH'):
     sys.path.append(os.environ.get('HIPPYFLOW_PATH'))
 import hippylib as hp
-import hippyflow as hf
+try:
+    import hippyflow as hf
+except ImportError:
+    # hippyflow is optional - only needed for StateSpaceIdentityOperator and LinearStateObservable
+    # If not available, we'll define minimal replacements
+    class StateSpaceIdentityOperator:
+        def __init__(self, M, use_mass_matrix=False):
+            self.M = M
+    class LinearStateObservable:
+        def __init__(self, pde, B):
+            self.pde = pde
+            self.B = B
+    hf = type('hf', (), {'StateSpaceIdentityOperator': StateSpaceIdentityOperator, 'LinearStateObservable': LinearStateObservable})()
 
 import math
 from mpi4py import MPI

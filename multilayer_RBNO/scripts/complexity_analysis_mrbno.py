@@ -48,7 +48,7 @@ HYPERPARAMETERS = {
     'train_frac': 0.7,
     'val_frac': 0.2,
     'test_frac': 0.1,
-    'num_samples': 1000,
+    'num_samples': 10000,
 }
 
 # Fixed modes × width products (4 curves per dataset)
@@ -239,7 +239,7 @@ def compute_rel_errors(model, loader, device, y_mean, y_std, is_complex=False):
     
     return np.mean(rel_l1_errors) * 100, np.mean(rel_l2_errors) * 100
 
-def load_dataset(dataset_path, dataset_type, num_samples=1000):
+def load_dataset(dataset_path, dataset_type, num_samples=10000):
     """Load dataset and return X, Y, and metadata."""
     if dataset_type == 'kolmogorov':
         # For Kolmogorov: load .npy file and create input-output pairs

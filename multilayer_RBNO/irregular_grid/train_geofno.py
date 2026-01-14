@@ -25,19 +25,14 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
     model.train()
     total_loss = 0.0
     num_batches = 0
+    has_material = hasattr(model, 'use_material_conditioning') and model.use_material_conditioning
     
     for batch in dataloader:
         batch_data, batch_target, batch_material = batch
         batch_data = batch_data.to(device)
         batch_target = batch_target.to(device)
         
-        if batch_material.shape[0] > 0 and batch_material.numel() > 1:
-            batch_material = batch_material.to(device)
-        else:
-            batch_material = None
-        
-        batch_data = batch_data.to(device)
-        batch_target = batch_target.to(device)
+        batch_material = batch_material.to(device) if has_material and batch_material.numel() > 0 else None
         
         optimizer.zero_grad()
         output = model(batch_data, material_props=batch_material)
@@ -56,6 +51,7 @@ def validate(model, dataloader, criterion, device):
     model.eval()
     total_loss = 0.0
     num_batches = 0
+    has_material = hasattr(model, 'use_material_conditioning') and model.use_material_conditioning
     
     with torch.no_grad():
         for batch in dataloader:
@@ -63,16 +59,57 @@ def validate(model, dataloader, criterion, device):
             batch_data = batch_data.to(device)
             batch_target = batch_target.to(device)
             
-            if batch_material.shape[0] > 0 and batch_material.numel() > 1:
-                batch_material = batch_material.to(device)
-            else:
-                batch_material = None
-            
-            batch_data = batch_data.to(device)
-            batch_target = batch_target.to(device)
+            batch_material = batch_material.to(device) if has_material and batch_material.numel() > 0 else None
             
             output = model(batch_data, material_props=batch_material)
             loss = criterion(output, batch_target)
+            
+            total_loss += loss.item()
+            num_batches += 1
+    
+    return total_loss / num_batches if num_batches > 0 else 0.0
+
+
+def validate_airfoil_downsampled(model, dataloader, criterion, device):
+    """
+    Validate airfoil model on downsampled mesh (56x51 instead of 221x51).
+    
+    Downsampling: take every 4th row in X direction (r1=4), keep all in Y direction (r2=1).
+    Original: 221 x 51 = 11271 nodes
+    Downsampled: 56 x 51 = 2856 nodes
+    """
+    model.eval()
+    total_loss = 0.0
+    num_batches = 0
+    has_material = hasattr(model, 'use_material_conditioning') and model.use_material_conditioning
+    
+    original_height, original_width = 221, 51
+    downsampled_height, downsampled_width = 56, 51
+    r1, r2 = 4, 1
+    
+    downsampled_indices = []
+    for i in range(0, original_height, r1):
+        row_start = i * original_width
+        row_end = row_start + original_width
+        downsampled_indices.extend(range(row_start, row_end))
+    
+    downsampled_indices = torch.tensor(downsampled_indices, dtype=torch.long, device=device)
+    
+    with torch.no_grad():
+        for batch in dataloader:
+            batch_data, batch_target, batch_material = batch
+            batch_data = batch_data.to(device)
+            batch_target = batch_target.to(device)
+            
+            batch_material = batch_material.to(device) if has_material and batch_material.numel() > 0 else None
+            
+            output = model(batch_data, material_props=batch_material)
+            
+            batch_size = output.shape[0]
+            output_downsampled = output[:, :, downsampled_indices]
+            target_downsampled = batch_target[:, :, downsampled_indices]
+            
+            loss = criterion(output_downsampled, target_downsampled)
             
             total_loss += loss.item()
             num_batches += 1
@@ -118,6 +155,12 @@ def main():
                        help='Use grid-based skip connections (like Geo-FNO b layers)')
     parser.add_argument('--use_input_skip', action='store_true', default=False,
                        help='Use direct skip connection from input to output')
+    parser.add_argument('--use_weighted_loss', action='store_true', default=False,
+                       help='Use weighted loss for high-stress regions (beta=0.5)')
+    parser.add_argument('--use_multiplicative_conditioning', action='store_true', default=False,
+                       help='Use multiplicative material conditioning instead of additive')
+    parser.add_argument('--use_material_adaptive_pca', action='store_true', default=False,
+                       help='Use material-adaptive PCA basis transformation')
     parser.add_argument('--patience', type=int, default=50,
                        help='Early stopping patience (default: 50 epochs)')
     parser.add_argument('--min_delta', type=float, default=1e-6,
@@ -143,11 +186,12 @@ def main():
         dataset_type=args.dataset_type,
         train_split=0.7,
         val_split=0.2,
-        normalize=True
+        normalize=False,
+        use_geofno_split=True
     )
     
     train_dataset = datasets['train']
-    val_dataset = datasets['val']
+    val_dataset = datasets.get('val', None)
     test_dataset = datasets['test']
     
     material_prop_dim = None
@@ -181,19 +225,26 @@ def main():
         pca_mean=pca_mean,
         mesh_coords=mesh_coords,
         material_prop_dim=material_prop_dim,
-        num_nodes=mesh_coords.shape[0]
+        num_nodes=mesh_coords.shape[0],
+        use_multiplicative_conditioning=args.use_multiplicative_conditioning,
+        material_adaptive_pca=args.use_material_adaptive_pca
     ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False) if val_dataset is not None else None
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
     
     # Use relative L1 loss for training/validation
-    criterion = LpLoss(d=2, p=1, size_average=False, reduction=True)
-    criterion.forward = lambda x, y: criterion.rel_l1(x, y)
-    print("Using Relative L1 Loss")
+    if args.use_weighted_loss:
+        criterion = LpLoss(d=2, p=1, size_average=False, reduction=True)
+        criterion.forward = lambda x, y: criterion.weighted_rel_l1(x, y, beta=0.5)
+        print("Using Weighted Relative L1 Loss (beta=0.5)")
+    else:
+        criterion = LpLoss(d=2, p=1, size_average=False, reduction=True)
+        criterion.forward = lambda x, y: criterion.rel_l1(x, y)
+        print("Using Relative L1 Loss")
     
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
@@ -229,48 +280,70 @@ def main():
     for epoch in range(args.epochs):
         t1 = default_timer()
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss = validate(model, val_loader, criterion, device)
+        if val_loader is not None:
+            val_loss = validate(model, val_loader, criterion, device)
+        else:
+            val_loss = float('inf')
         scheduler.step()
         t2 = default_timer()
         
         # Print every 10 epochs or first epoch
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"Epoch {epoch+1}/{args.epochs}: Time = {t2-t1:.2f}s, Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}, LR = {scheduler.get_last_lr()[0]:.6f}")
+            if val_loader is not None:
+                print(f"Epoch {epoch+1}/{args.epochs}: Time = {t2-t1:.2f}s, Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}, LR = {scheduler.get_last_lr()[0]:.6f}")
+            else:
+                print(f"Epoch {epoch+1}/{args.epochs}: Time = {t2-t1:.2f}s, Train Loss = {train_loss:.6f}, LR = {scheduler.get_last_lr()[0]:.6f}")
         
-        # Early stopping and save best model
-        improvement = best_val_loss - val_loss
-        if improvement > args.min_delta:
-            best_val_loss = val_loss
-            best_epoch = epoch
-            patience_counter = 0
-            scratch_dir = os.environ.get('SCRATCH', '/pscratch/sd/d/dvod')
-            checkpoint_dir = os.path.join(scratch_dir, 'checkpoints', 'geofno')
-            os.makedirs(checkpoint_dir, exist_ok=True)
-            checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_best_{args.dataset_type}.pt')
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': val_loss,
-                'train_loss': train_loss,
-                'args': vars(args),
-            }, checkpoint_path)
+        # Early stopping and save best model (only if validation set exists)
+        if val_loader is not None:
+            improvement = best_val_loss - val_loss
+            if improvement > args.min_delta:
+                best_val_loss = val_loss
+                best_epoch = epoch
+                patience_counter = 0
+                scratch_dir = os.environ.get('SCRATCH', '/pscratch/sd/d/dvod')
+                checkpoint_dir = os.path.join(scratch_dir, 'checkpoints', 'geofno')
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                checkpoint_suffix = ''
+                if args.use_weighted_loss:
+                    checkpoint_suffix = '_weighted_loss'
+                elif args.use_multiplicative_conditioning:
+                    checkpoint_suffix = '_multiplicative_cond'
+                elif args.use_material_adaptive_pca:
+                    checkpoint_suffix = '_adaptive_pca'
+                checkpoint_path = os.path.join(checkpoint_dir, 'checkpoint_best_{}{}.pt'.format(args.dataset_type, checkpoint_suffix))
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'val_loss': val_loss,
+                    'train_loss': train_loss,
+                    'args': vars(args),
+                }, checkpoint_path)
+            else:
+                patience_counter += 1
+            
+            # Early stopping
+            if patience_counter >= args.patience:
+                print(f"\nEarly stopping triggered at epoch {epoch+1}")
+                print(f"Best validation loss: {best_val_loss:.6f} at epoch {best_epoch+1}")
+                break
         else:
-            patience_counter += 1
-        
-        # Early stopping
-        if patience_counter >= args.patience:
-            print(f"\nEarly stopping triggered at epoch {epoch+1}")
-            print(f"Best validation loss: {best_val_loss:.6f} at epoch {best_epoch+1}")
-            break
+            best_val_loss = train_loss
     
     print("=" * 60)
     print("Training complete!")
-    print(f"Best validation loss: {best_val_loss:.6f}")
+    if val_loader is not None:
+        print(f"Best validation loss: {best_val_loss:.6f}")
     
     print("\nEvaluating on test set...")
     test_loss = validate(model, test_loader, criterion, device)
-    print(f"Test loss: {test_loss:.6f}")
+    print(f"Test loss (full mesh): {test_loss:.6f}")
+    
+    if args.dataset_type == 'airfoil':
+        print("\nComputing test loss on downsampled mesh (56x51)...")
+        test_loss_downsampled = validate_airfoil_downsampled(model, test_loader, criterion, device)
+        print(f"Test loss (downsampled 56x51): {test_loss_downsampled:.6f}")
 
 
 if __name__ == "__main__":
