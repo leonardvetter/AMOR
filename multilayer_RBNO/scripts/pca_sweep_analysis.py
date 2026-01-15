@@ -25,7 +25,7 @@ models_dir = os.path.join(repo_root, 'multilayer_RBNO', 'models')
 sys.path.insert(0, models_dir)
 
 from MRBNO import MRBNO
-from MRBNO_simple import PCAReducerMultiChannel
+from PCAReducer import PCAReducerMultiChannel
 
 # Standard hyperparameters (from notebooks)
 HYPERPARAMETERS = {
@@ -269,7 +269,7 @@ def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
         k = min(k, pca_components_base.shape[0])
         
         # Create model
-        model = MRBNO(width=width, rb=rb, k_in=k_in, k_out=k_out, layers=HYPERPARAMETERS['layers'], dropout=0.0, init_scale=0.1, use_skip_connections=True, use_batch_norm=True, use_coordinates=True, add_constant_mode=False, use_factorized_weights='auto')
+        model = MRBNO(width=width, rb=rb, k_in=k_in, k_out=k_out, layers=HYPERPARAMETERS['layers'], dropout=0.0, init_scale=0.1, use_skip_connections=True, use_batch_norm=True, use_coordinates=True, add_constant_mode=False, use_factorized_weights=False)
         
         # Create data loaders
         train_loader = DataLoader(TensorDataset(X_train_t, Y_train_t),
@@ -316,7 +316,7 @@ def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
                 pca_mean = pca_mean_base
             
             # Create model
-            model = MRBNO(width=width, rb=rb, k_in=k_in, k_out=k_out, layers=HYPERPARAMETERS['layers'], dropout=0.0, init_scale=0.1, use_skip_connections=True, use_batch_norm=True, use_coordinates=True, add_constant_mode=False, use_factorized_weights='auto')
+            model = MRBNO(width=width, rb=rb, k_in=k_in, k_out=k_out, layers=HYPERPARAMETERS['layers'], dropout=0.0, init_scale=0.1, use_skip_connections=True, use_batch_norm=True, use_coordinates=True, add_constant_mode=False, use_factorized_weights=False)
             
             # Create data loaders
             train_loader = DataLoader(TensorDataset(X_train_t, Y_train_t),

@@ -27,8 +27,43 @@ The `MRBNO_lift_irregular.py` model adapts MRBNO for point clouds and irregular 
 ## Datasets
 
 Supports Geo-FNO datasets:
-- Elasticity (Darcy flow on irregular domains)
-- Airfoil (flow around airfoils)
+- **Elasticity**: Darcy flow on irregular domains with varying material properties
+- **Airfoil**: Flow around airfoils with varying geometries
+
+### Dataset Sources
+
+The datasets are available from:
+- **Google Drive**: https://drive.google.com/drive/folders/1YBuaoTdOSr_qzaow-G-iwvbUI7fiUzu8
+- **GitHub Repository**: https://github.com/neuraloperator/Geo-FNO
+
+### Dataset Details
+
+**Elasticity Dataset**:
+- Input: Material property field (permeability) on irregular mesh
+- Output: Solution field (pressure/velocity) on the same mesh
+- Mesh: Irregular triangular mesh with varying node positions
+- Split: First 1000 samples for training, last 200 for testing (Geo-FNO standard)
+
+**Airfoil Dataset**:
+- Input: Flow field channels 0-3 (Q field) + X and Y coordinates
+- Output: Flow field channel 4 (Q field)
+- Mesh: Regular grid extracted as point cloud
+- Split: First 1000 samples for training, next 200 for testing (Geo-FNO standard)
+
+### Downloading Datasets
+
+Use the provided scripts to download and prepare the datasets:
+```bash
+# Download datasets from Google Drive or clone Geo-FNO repository
+python download_geofno_datasets.py
+
+# Or use the shell script
+./download_geofno_from_drive.sh
+```
+
+The datasets should be placed in `$SCRATCH/data/Geo-FNO/data/` with the following structure:
+- `diffeo/`: Elasticity dataset files
+- `naca/`: Airfoil dataset files
 
 ## Model Architecture
 

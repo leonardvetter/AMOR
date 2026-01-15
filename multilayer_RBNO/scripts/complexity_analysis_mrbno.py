@@ -37,7 +37,7 @@ models_dir = os.path.join(repo_root, 'multilayer_RBNO', 'models')
 sys.path.insert(0, models_dir)
 
 from MRBNO import MRBNO
-from MRBNO_simple import PCAReducerMultiChannel
+from PCAReducer import PCAReducerMultiChannel
 
 # Fixed hyperparameters (from notebooks)
 HYPERPARAMETERS = {
@@ -436,7 +436,7 @@ def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
                 use_batch_norm=True,
                 use_coordinates=True,
                 add_constant_mode=False,
-                use_factorized_weights='auto'
+                use_factorized_weights=False
             )
             
             num_params = sum(p.numel() for p in model.parameters())
@@ -618,7 +618,7 @@ def process_dataset_v2(dataset_name, dataset_type, results_dir, scratch_dir):
                 use_batch_norm=True,
                 use_coordinates=True,
                 add_constant_mode=False,
-                use_factorized_weights='auto'
+                use_factorized_weights=False
             )
             
             num_params = sum(p.numel() for p in model.parameters())

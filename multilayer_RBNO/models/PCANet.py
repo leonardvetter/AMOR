@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from typing import Optional
-from MRBNO_simple import PCAReducerMultiChannel
+from PCAReducer import PCAReducerMultiChannel
 
 
 class PCANet(nn.Module):

@@ -24,7 +24,7 @@ sys.path.insert(0, models_dir)
 from MRBNO import MRBNO
 from FNO_model import FNO2d
 from PCANet import PCANet
-from MRBNO_simple import PCAReducerMultiChannel
+from PCAReducer import PCAReducerMultiChannel
 
 HYPERPARAMETERS = {
     'layers': 4,
@@ -225,7 +225,7 @@ def main():
                 use_batch_norm=True,
                 use_coordinates=True,
                 add_constant_mode=False,
-                use_factorized_weights='auto',
+                use_factorized_weights=False,
             ),
             'FNO': FNO2d(
                 modes1=HYPERPARAMETERS['fno_modes'][0], modes2=HYPERPARAMETERS['fno_modes'][1],
