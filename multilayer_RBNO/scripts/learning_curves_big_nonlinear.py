@@ -23,7 +23,7 @@ models_dir = os.path.join(repo_root, 'multilayer_RBNO', 'models')
 sys.path.insert(0, models_dir)
 
 from FNO_model import FNO2d
-from MRBNO_lift_simple import MRBNOLiftSimple
+from MRBNO import MRBNO
 from PCANet import PCANet
 from MRBNO_simple import PCAReducerMultiChannel
 

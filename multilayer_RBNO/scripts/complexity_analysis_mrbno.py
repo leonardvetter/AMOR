@@ -5,13 +5,18 @@ Complexity Analysis for MRBNO Lift Simple Model
 This script creates plots similar to Figure 1 in the paper (arxiv.org/pdf/2304.13221),
 showing the relationship between modes × width and model performance.
 
-For each dataset:
-- Trains MRBNO_lift_simple with different fixed numbers of modes × width
-- Varies number of modes/width such that for every fixed product, one curve is created
-- 4 curves per dataset (fixed products: 144, 288, 576, 1152)
-- 5-7 configurations per curve
-- Results saved after each dataset
-- Can restart from where it left off
+For each dataset, two versions are run:
+Version 1: Sweep over width and k (modes) with fixed width × k
+  - k_in = k_out = modes (same number of input and output modes)
+  - 4 curves per dataset (fixed products: 288, 576, 1152, 2304)
+  - 6-7 configurations per curve
+
+Version 2: Sweep over width and epsilon for fixed width × (1/epsilon)
+  - k_in and k_out computed from epsilon using rb.k_from_cutoff()
+  - 4 curves per dataset (fixed products: 24000, 48000, 96000, 192000)
+  - 6 configurations per curve
+
+Results saved after each dataset. Can restart from where it left off.
 """
 
 import numpy as np
@@ -31,7 +36,7 @@ repo_root = os.path.dirname(os.path.dirname(script_dir))
 models_dir = os.path.join(repo_root, 'multilayer_RBNO', 'models')
 sys.path.insert(0, models_dir)
 
-from MRBNO_lift_simple import MRBNOLiftSimple
+from MRBNO import MRBNO
 from MRBNO_simple import PCAReducerMultiChannel
 
 # Fixed hyperparameters (from notebooks)
@@ -51,16 +56,32 @@ HYPERPARAMETERS = {
     'num_samples': 10000,
 }
 
-# Fixed modes × width products (4 curves per dataset)
+# Fixed modes × width products (4 curves per dataset) - Version 1
 FIXED_PRODUCTS = [288, 576, 1152, 2304]
 
-# Configurations for each fixed product (modes, width) pairs
+# Configurations for each fixed product (modes, width) pairs - Version 1
 # Format: {product: [(modes, width), ...]}
+# Note: For version 1, k_in = k_out = modes
 CONFIGURATIONS = {
     288: [(8, 36), (12, 24), (16, 18), (18, 16), (24, 12), (36, 8)],  # 6 configs
     576: [(12, 48), (16, 36), (18, 32), (24, 24), (32, 18), (36, 16), (48, 12)],  # 7 configs
     1152: [(16, 72), (18, 64), (24, 48), (32, 36), (36, 32), (48, 24), (64, 18)],  # 7 configs
     2304: [(24, 96), (32, 72), (36, 64), (48, 48), (64, 36), (72, 32), (96, 24)],  # 7 configs
+}
+
+# Fixed width × (1/epsilon) products - Version 2
+# Format: {product: [(width, epsilon), ...]}
+# For each fixed product, we sweep over width and epsilon such that width × (1/epsilon) is constant
+FIXED_WIDTH_OVER_EPSILON = [24000, 48000, 96000, 192000]
+
+# Configurations for each fixed width/epsilon product - Version 2
+# Format: {product: [(width, epsilon), ...]}
+# epsilon values are chosen to give reasonable k_in/k_out values (typically 50-200)
+CONFIGURATIONS_V2 = {
+    24000: [(12, 0.0005), (16, 0.00067), (24, 0.001), (32, 0.00133), (36, 0.0015), (48, 0.002)],  # 6 configs
+    48000: [(16, 0.00033), (24, 0.0005), (32, 0.00067), (36, 0.00075), (48, 0.001), (64, 0.00133)],  # 6 configs
+    96000: [(24, 0.00025), (32, 0.00033), (36, 0.000375), (48, 0.0005), (64, 0.00067), (96, 0.001)],  # 6 configs
+    192000: [(32, 0.000167), (48, 0.00025), (64, 0.00033), (72, 0.000375), (96, 0.0005), (128, 0.00067)],  # 6 configs
 }
 
 # Training schedule: CosineAnnealingLR scheduler (same as notebooks)
@@ -398,32 +419,24 @@ def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
                 continue
             
             # Create model
-            # PCASpectralConv2d processes hidden representation with spatial dimensions (H, W)
-            # Use the PCA whose spatial dimensions match: (n_modes, H*W)
-            # - For Helmholtz: input has 1 channel -> input PCA is (n_modes, H*W) -> use input PCA
-            # - For nonlinear: output has 1 channel -> output PCA is (n_modes, H*W) -> use output PCA
-            # General rule: use PCA computed on data with same spatial dims as hidden representation
-            if in_channels == 1 and out_channels > 1:
-                # Input has single channel, output has multiple -> use input PCA
-                pca_components = rb.pca_in.components_
-                pca_mean = rb.pca_in.mean_
-            else:
-                # Otherwise use output PCA (matches spatial dims for single-channel output)
-                pca_components = rb.pca_out.components_
-                pca_mean = rb.pca_out.mean_
+            # For version 1 sweep: k_in = k_out = modes (same number of input and output modes)
+            # This ensures width × k is fixed as we sweep
+            k_in_used = min(modes, rb.pca_in.n_components_)
+            k_out_used = min(modes, rb.pca_out.n_components_)
             
-            model = MRBNOLiftSimple(
-                in_channels=in_channels,
-                out_channels=out_channels,
+            model = MRBNO(
                 width=width,
-                n_modes=modes,
-                n_layers=HYPERPARAMETERS['layers'],
-                add_coords=True,
-                norm="group",
-                dropout_p=0.0,
-                residual=True,
-                pca_components=pca_components,
-                pca_mean=pca_mean
+                rb=rb,
+                k_in=k_in_used,
+                k_out=k_out_used,
+                layers=HYPERPARAMETERS['layers'],
+                dropout=0.0,
+                init_scale=0.1,
+                use_skip_connections=True,
+                use_batch_norm=True,
+                use_coordinates=True,
+                add_constant_mode=False,
+                use_factorized_weights='auto'
             )
             
             num_params = sum(p.numel() for p in model.parameters())
@@ -476,6 +489,237 @@ def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
     
     print(f"\nCompleted dataset: {dataset_name}")
     return results
+
+
+def process_dataset_v2(dataset_name, dataset_type, results_dir, scratch_dir):
+    """
+    Process dataset with Version 2 sweep: width and epsilon for fixed width × (1/epsilon).
+    k_in and k_out are computed from epsilon using rb.k_from_cutoff().
+    """
+    dataset_path = os.path.join(scratch_dir, 'data', dataset_name)
+    if not os.path.exists(dataset_path):
+        print(f"Warning: Dataset {dataset_path} not found. Skipping.")
+        return None
+    
+    # Load dataset (same as version 1)
+    print(f"Loading dataset from {dataset_path}...")
+    X, Y, is_complex = load_dataset(dataset_path, dataset_type, HYPERPARAMETERS['num_samples'])
+    print(f"Loaded {len(X)} samples. X shape: {X.shape}, Y shape: {Y.shape}, is_complex: {is_complex}")
+    
+    # Split data
+    n_train = int(HYPERPARAMETERS['train_frac'] * len(X))
+    n_val = int(HYPERPARAMETERS['val_frac'] * len(X))
+    
+    X_train, Y_train = X[:n_train], Y[:n_train]
+    X_val, Y_val = X[n_train:n_train+n_val], Y[n_train:n_train+n_val]
+    X_test, Y_test = X[n_train+n_val:], Y[n_train+n_val:]
+    
+    print(f"Split: train={len(X_train)}, val={len(X_val)}, test={len(X_test)}")
+    
+    # Normalize
+    x_mean = X_train.mean()
+    x_std = X_train.std()
+    y_mean = Y_train.mean()
+    y_std = Y_train.std()
+    
+    X_train = (X_train - x_mean) / (x_std + 1e-8)
+    Y_train = (Y_train - y_mean) / (y_std + 1e-8)
+    X_val = (X_val - x_mean) / (x_std + 1e-8)
+    Y_val = (Y_val - y_mean) / (y_std + 1e-8)
+    X_test = (X_test - x_mean) / (x_std + 1e-8)
+    Y_test = (Y_test - y_mean) / (y_std + 1e-8)
+    
+    # Convert to PyTorch tensors
+    X_train_t = torch.from_numpy(X_train).float()
+    Y_train_t = torch.from_numpy(Y_train).float()
+    X_val_t = torch.from_numpy(X_val).float()
+    Y_val_t = torch.from_numpy(Y_val).float()
+    X_test_t = torch.from_numpy(X_test).float()
+    Y_test_t = torch.from_numpy(Y_test).float()
+    
+    # Create data loaders
+    batch_size = HYPERPARAMETERS['batch_size']
+    if 'Re5000' in dataset_name:
+        batch_size = 8
+        print(f"Using reduced batch size {batch_size} for Re5000 dataset")
+    
+    train_loader = DataLoader(TensorDataset(X_train_t, Y_train_t), 
+                             batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(TensorDataset(X_val_t, Y_val_t), 
+                           batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(TensorDataset(X_test_t, Y_test_t), 
+                             batch_size=batch_size, shuffle=False)
+    
+    # Compute PCA (shared by all configurations)
+    print("Computing PCA...")
+    rb = PCAReducerMultiChannel(
+        bc_weight=1.0,
+        boundary_threshold=0.1,
+        use_boundary_weighting=False,
+    ).fit(X_train, Y_train)
+    
+    # Determine input/output channels
+    in_channels = X.shape[1]
+    out_channels = Y.shape[1]
+    
+    # Device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Results storage
+    results = {
+        'dataset': dataset_name,
+        'dataset_type': dataset_type,
+        'version': 2,
+        'hyperparameters': HYPERPARAMETERS,
+        'training_schedule': TRAINING_SCHEDULE,
+        'configurations': {},
+    }
+    
+    # Process each fixed width/epsilon product
+    for product in FIXED_WIDTH_OVER_EPSILON:
+        print(f"\n--- Fixed Product: {product} (width × 1/epsilon) ---")
+        product_results = []
+        
+        for width, epsilon in CONFIGURATIONS_V2[product]:
+            config_key = f"width_{width}_epsilon_{epsilon:.6f}"
+            print(f"\nTraining with width={width}, epsilon={epsilon} (product={width/epsilon:.0f})...")
+            
+            # Check if already computed
+            checkpoint_path = os.path.join(results_dir, f"{dataset_name.replace('.', '_')}_v2_{config_key}_checkpoint.pt")
+            result_path = os.path.join(results_dir, f"{dataset_name.replace('.', '_')}_v2_{config_key}_result.json")
+            
+            if os.path.exists(result_path):
+                print(f"  Loading existing result from {result_path}...")
+                with open(result_path, 'r') as f:
+                    config_result = json.load(f)
+                product_results.append(config_result)
+                continue
+            
+            # Compute k_in and k_out from epsilon
+            j_in = 1 - epsilon
+            j_out = 1 - epsilon
+            k_in, k_out = rb.k_from_cutoff(j_in=j_in, j_out=j_out)
+            k_in = min(k_in, rb.pca_in.n_components_)
+            k_out = min(k_out, rb.pca_out.n_components_)
+            
+            print(f"  Computed k_in={k_in}, k_out={k_out} from epsilon={epsilon}")
+            
+            # Create model
+            model = MRBNO(
+                width=width,
+                rb=rb,
+                k_in=k_in,
+                k_out=k_out,
+                layers=HYPERPARAMETERS['layers'],
+                dropout=0.0,
+                init_scale=0.1,
+                use_skip_connections=True,
+                use_batch_norm=True,
+                use_coordinates=True,
+                add_constant_mode=False,
+                use_factorized_weights='auto'
+            )
+            
+            num_params = sum(p.numel() for p in model.parameters())
+            print(f"  Model parameters: {num_params:,}")
+            
+            # Train
+            set_seed(HYPERPARAMETERS['seed'])
+            train_result = train_model(model, train_loader, val_loader, device, HYPERPARAMETERS)
+            
+            # Evaluate
+            train_l1, train_l2 = compute_rel_errors(model, train_loader, device, y_mean, y_std, is_complex)
+            val_l1, val_l2 = compute_rel_errors(model, val_loader, device, y_mean, y_std, is_complex)
+            test_l1, test_l2 = compute_rel_errors(model, test_loader, device, y_mean, y_std, is_complex)
+            
+            config_result = {
+                'width': width,
+                'epsilon': epsilon,
+                'product': width / epsilon,
+                'k_in': k_in,
+                'k_out': k_out,
+                'num_params': num_params,
+                'train_rel_l1': train_l1,
+                'train_rel_l2': train_l2,
+                'val_rel_l1': val_l1,
+                'val_rel_l2': val_l2,
+                'test_rel_l1': test_l1,
+                'test_rel_l2': test_l2,
+                'best_val_loss': train_result['best_val_loss'],
+                'best_epoch': train_result['best_epoch'],
+                'training_time': train_result['training_time'],
+            }
+            
+            # Save result immediately
+            with open(result_path, 'w') as f:
+                json.dump(config_result, f, indent=2)
+            
+            # Save checkpoint
+            torch.save(model.state_dict(), checkpoint_path)
+            
+            product_results.append(config_result)
+            print(f"  Train Rel L1: {train_l1:.4f}%, Val Rel L1: {val_l1:.4f}%, Test Rel L1: {test_l1:.4f}%")
+        
+        results['configurations'][f'product_{product}'] = product_results
+    
+    # Save complete results
+    results_file = os.path.join(results_dir, f"{dataset_name.replace('.', '_')}_v2_results.json")
+    with open(results_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    # Create plot
+    create_plot_v2(results, results_dir, dataset_name)
+    
+    print(f"\nCompleted dataset (Version 2): {dataset_name}")
+    return results
+
+
+def create_plot_v2(results, results_dir, dataset_name):
+    """Create plot for Version 2: width and epsilon sweep."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    
+    colors = ['blue', 'green', 'orange', 'red']
+    
+    for idx, product in enumerate(FIXED_WIDTH_OVER_EPSILON):
+        product_key = f'product_{product}'
+        if product_key not in results['configurations']:
+            continue
+        
+        configs = results['configurations'][product_key]
+        width_list = [c['width'] for c in configs]
+        test_l1_list = [c['test_rel_l1'] for c in configs]
+        test_l2_list = [c['test_rel_l2'] for c in configs]
+        
+        # Sort by width
+        sorted_data = sorted(zip(width_list, test_l1_list, test_l2_list))
+        width_list, test_l1_list, test_l2_list = zip(*sorted_data)
+        
+        axes[0].plot(width_list, test_l1_list, 'o-', label=f'Product={product}', 
+                    color=colors[idx % len(colors)], linewidth=2, markersize=6)
+        axes[1].plot(width_list, test_l2_list, 'o-', label=f'Product={product}', 
+                    color=colors[idx % len(colors)], linewidth=2, markersize=6)
+    
+    axes[0].set_xlabel('Width', fontsize=12)
+    axes[0].set_ylabel('Test Relative L1 Error (%)', fontsize=12)
+    axes[0].set_title(f'Complexity Analysis V2: {dataset_name}', fontsize=14)
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+    axes[0].set_xscale('log')
+    
+    axes[1].set_xlabel('Width', fontsize=12)
+    axes[1].set_ylabel('Test Relative L2 Error (%)', fontsize=12)
+    axes[1].set_title(f'Complexity Analysis V2: {dataset_name}', fontsize=14)
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+    axes[1].set_xscale('log')
+    
+    plt.tight_layout()
+    plot_path = os.path.join(results_dir, f"{dataset_name.replace('.', '_')}_v2_complexity_plot.png")
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Plot saved to {plot_path}")
 
 def create_plot(results, results_dir, dataset_name):
     """Create plot similar to Figure 1 in the paper."""
@@ -538,17 +782,30 @@ def main():
     print(f"\nTraining Schedule:")
     for key, value in TRAINING_SCHEDULE.items():
         print(f"  {key}: {value}")
-    print(f"\nFixed Products: {FIXED_PRODUCTS}")
-    print(f"\nConfigurations per product:")
+    print(f"\nVersion 1 - Fixed Products: {FIXED_PRODUCTS}")
+    print(f"\nConfigurations per product (V1):")
     for product in FIXED_PRODUCTS:
         print(f"  Product {product}: {len(CONFIGURATIONS[product])} configurations")
         for modes, width in CONFIGURATIONS[product]:
             print(f"    modes={modes}, width={width} (product={modes*width})")
     
+    print(f"\nVersion 2 - Fixed Products: {FIXED_WIDTH_OVER_EPSILON}")
+    print(f"\nConfigurations per product (V2):")
+    for product in FIXED_WIDTH_OVER_EPSILON:
+        print(f"  Product {product}: {len(CONFIGURATIONS_V2[product])} configurations")
+        for width, epsilon in CONFIGURATIONS_V2[product]:
+            print(f"    width={width}, epsilon={epsilon:.6f} (product={width/epsilon:.0f})")
+    
     print(f"\nResults will be saved to: {results_dir}")
     print(f"Processing {len(DATASETS)} datasets...")
     
     all_results = {}
+    all_results_v2 = {}
+    
+    # Process Version 1 (width × k sweep)
+    print("\n" + "="*70)
+    print("VERSION 1: Sweep over width and k (modes) with fixed width × k")
+    print("="*70)
     for dataset_name, dataset_type in DATASETS:
         try:
             result = process_dataset(dataset_name, dataset_type, results_dir, scratch_dir)
@@ -560,14 +817,31 @@ def main():
             traceback.print_exc()
             continue
     
+    # Process Version 2 (width × 1/epsilon sweep)
+    print("\n" + "="*70)
+    print("VERSION 2: Sweep over width and epsilon with fixed width × (1/epsilon)")
+    print("="*70)
+    for dataset_name, dataset_type in DATASETS:
+        try:
+            result = process_dataset_v2(dataset_name, dataset_type, results_dir, scratch_dir)
+            if result:
+                all_results_v2[dataset_name] = result
+        except Exception as e:
+            print(f"Error processing {dataset_name} (V2): {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
     # Save summary
     summary_path = os.path.join(results_dir, 'summary.json')
     with open(summary_path, 'w') as f:
         json.dump({
             'hyperparameters': HYPERPARAMETERS,
             'training_schedule': TRAINING_SCHEDULE,
-            'configurations': CONFIGURATIONS,
-            'datasets_processed': list(all_results.keys()),
+            'configurations_v1': CONFIGURATIONS,
+            'configurations_v2': CONFIGURATIONS_V2,
+            'datasets_processed_v1': list(all_results.keys()),
+            'datasets_processed_v2': list(all_results_v2.keys()),
         }, f, indent=2)
     
     print(f"\n{'='*70}")

@@ -1,0 +1,20 @@
+/tmp/tmpczyax4aj/dolfin_cpp_module_8f1a51deef6610859f699928d4e9f47b.cpp:153:7: warning: ‘NumpyScalarExpression3D’ declared with greater visibility than the type of its field ‘NumpyScalarExpression3D::data’ [-Wattributes]
+ class NumpyScalarExpression3D : public dolfin::Expression
+       ^~~~~~~~~~~~~~~~~~~~~~~
+/tmp/tmpczyax4aj/dolfin_cpp_module_8f1a51deef6610859f699928d4e9f47b.cpp:245:7: warning: ‘NumpyVectorExpression3D’ declared with greater visibility than the type of its field ‘NumpyVectorExpression3D::data’ [-Wattributes]
+ class NumpyVectorExpression3D : public dolfin::Expression
+       ^~~~~~~~~~~~~~~~~~~~~~~
+/tmp/tmpczyax4aj/dolfin_cpp_module_8f1a51deef6610859f699928d4e9f47b.cpp:339:7: warning: ‘NumpyScalarExpression2D’ declared with greater visibility than the type of its field ‘NumpyScalarExpression2D::data’ [-Wattributes]
+ class NumpyScalarExpression2D : public dolfin::Expression
+       ^~~~~~~~~~~~~~~~~~~~~~~
+/tmp/tmpczyax4aj/dolfin_cpp_module_8f1a51deef6610859f699928d4e9f47b.cpp:410:7: warning: ‘NumpyVectorExpression2D’ declared with greater visibility than the type of its field ‘NumpyVectorExpression2D::data’ [-Wattributes]
+ class NumpyVectorExpression2D : public dolfin::Expression
+       ^~~~~~~~~~~~~~~~~~~~~~~
+/tmp/tmpczyax4aj/dolfin_cpp_module_8f1a51deef6610859f699928d4e9f47b.cpp:484:7: warning: ‘NumpyScalarExpression1D’ declared with greater visibility than the type of its field ‘NumpyScalarExpression1D::data’ [-Wattributes]
+ class NumpyScalarExpression1D : public dolfin::Expression
+       ^~~~~~~~~~~~~~~~~~~~~~~
+/tmp/tmpczyax4aj/dolfin_cpp_module_8f1a51deef6610859f699928d4e9f47b.cpp:537:7: warning: ‘NumpyVectorExpression1D’ declared with greater visibility than the type of its field ‘NumpyVectorExpression1D::data’ [-Wattributes]
+ class NumpyVectorExpression1D : public dolfin::Expression
+       ^~~~~~~~~~~~~~~~~~~~~~~
+/usr/lib64/gcc/x86_64-suse-linux/7/../../../../x86_64-suse-linux/bin/ld: cannot find /usr/lib64/libmvec_nonshared.a: No such file or directory
+collect2: error: ld returned 1 exit status

@@ -21,7 +21,7 @@ repo_root = os.path.dirname(os.path.dirname(script_dir))
 models_dir = os.path.join(repo_root, 'multilayer_RBNO', 'models')
 sys.path.insert(0, models_dir)
 
-from MRBNO_lift_simple import MRBNOLiftSimple
+from MRBNO import MRBNO
 from FNO_model import FNO2d
 from PCANet import PCANet
 from MRBNO_simple import PCAReducerMultiChannel
@@ -212,15 +212,20 @@ def main():
         k_in = min(k_in, rb.pca_in.n_components_)
         k_out = min(k_out, rb.pca_out.n_components_)
         
-        pca_components = rb.pca_out.components_[:k_out]
-        pca_mean = rb.pca_out.mean_
-        
         models_to_train = {
-            'MRBNO_Lift_Simple': MRBNOLiftSimple(
-                in_channels=2, out_channels=1, width=HYPERPARAMETERS['width'],
-                n_modes=k_out, n_layers=HYPERPARAMETERS['layers'], add_coords=True,
-                norm="group", dropout_p=0.0, residual=True,
-                pca_components=pca_components, pca_mean=pca_mean
+            'MRBNO': MRBNO(
+                width=HYPERPARAMETERS['width'],
+                rb=rb,
+                k_in=k_in,
+                k_out=k_out,
+                layers=HYPERPARAMETERS['layers'],
+                dropout=0.0,
+                init_scale=0.1,
+                use_skip_connections=True,
+                use_batch_norm=True,
+                use_coordinates=True,
+                add_constant_mode=False,
+                use_factorized_weights='auto',
             ),
             'FNO': FNO2d(
                 modes1=HYPERPARAMETERS['fno_modes'][0], modes2=HYPERPARAMETERS['fno_modes'][1],

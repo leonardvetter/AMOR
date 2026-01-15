@@ -24,7 +24,7 @@ repo_root = os.path.dirname(os.path.dirname(script_dir))
 models_dir = os.path.join(repo_root, 'multilayer_RBNO', 'models')
 sys.path.insert(0, models_dir)
 
-from MRBNO_lift_simple import MRBNOLiftSimple
+from MRBNO import MRBNO
 from MRBNO_simple import PCAReducerMultiChannel
 
 # Standard hyperparameters (from notebooks)
@@ -269,19 +269,7 @@ def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
         k = min(k, pca_components_base.shape[0])
         
         # Create model
-        model = MRBNOLiftSimple(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            width=HYPERPARAMETERS['width'],
-            n_modes=k,
-            n_layers=HYPERPARAMETERS['layers'],
-            add_coords=True,
-            norm="group",
-            dropout_p=0.0,
-            residual=True,
-            pca_components=pca_components_base[:k],
-            pca_mean=pca_mean_base
-        )
+        model = MRBNO(width=width, rb=rb, k_in=k_in, k_out=k_out, layers=HYPERPARAMETERS['layers'], dropout=0.0, init_scale=0.1, use_skip_connections=True, use_batch_norm=True, use_coordinates=True, add_constant_mode=False, use_factorized_weights='auto')
         
         # Create data loaders
         train_loader = DataLoader(TensorDataset(X_train_t, Y_train_t),
@@ -328,19 +316,7 @@ def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
                 pca_mean = pca_mean_base
             
             # Create model
-            model = MRBNOLiftSimple(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                width=HYPERPARAMETERS['width'],
-                n_modes=k_used,
-                n_layers=HYPERPARAMETERS['layers'],
-                add_coords=True,
-                norm="group",
-                dropout_p=0.0,
-                residual=True,
-                pca_components=pca_components,
-                pca_mean=pca_mean
-            )
+            model = MRBNO(width=width, rb=rb, k_in=k_in, k_out=k_out, layers=HYPERPARAMETERS['layers'], dropout=0.0, init_scale=0.1, use_skip_connections=True, use_batch_norm=True, use_coordinates=True, add_constant_mode=False, use_factorized_weights='auto')
             
             # Create data loaders
             train_loader = DataLoader(TensorDataset(X_train_t, Y_train_t),

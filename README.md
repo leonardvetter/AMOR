@@ -6,19 +6,21 @@ Repository for training and evaluating Multi-layer Reduced Basis Neural Operator
 
 This repository implements several neural operator architectures:
 - **FNO** (Fourier Neural Operator): Uses Fourier transforms for spectral operations
-- **MRBNO Lift Simple**: Uses PCA basis instead of Fourier basis, with same block structure as FNO
-- **MRBNO Lift v3/v5**: More complex MRBNO variants with separate input/output PCA bases
+- **MRBNO**: Multi-layer Reduced Basis Neural Operator using separate input/output PCA bases with basis transition
 - **PCANet**: Simple neural network operating in PCA coefficient space
 
 ## Models
 
-### MRBNO Lift Simple
+### MRBNO
 
-- **Input channels**: Handles arbitrary number via lifting layer `fc0` (Conv2d with `in_channels + 2*add_coords` input channels)
-- **Architecture**: Same structure as FNO2d (lifting → blocks → projection)
-- **PCA basis**: Single PCA basis shared for both encoding and decoding across all blocks, processes hidden representation with spatial dimensions (H, W)
-- **Key difference from FNO**: Uses PCA encoding/decoding instead of FFT/IFFT in spectral convolution blocks
-- **Note**: Uses the same PCA basis for input and output transformations (unlike MRBNO v3/v5 which use separate input/output bases)
+- **Architecture**: Multi-stage basis transition with separate input/output PCA bases
+  - Block 0: Input basis → Input basis
+  - Block 1: Input basis → Output basis (transition)
+  - Blocks 2+: Output basis → Output basis
+- **Data representation**: Flattens spatial dimensions after lifting, works in (B, width, C*H*W) space
+- **Weight structure**: 4D tensor mixing width channels and PCA modes, with optional factorized representation for parameter efficiency
+- **Features**: Scalar gates for adaptive skip connections, global skip connection, batch normalization in latent space
+- **Parameter efficiency**: Auto mode uses factorized weights when k_in × k_out > 10,000
 
 ### FNO
 
@@ -26,12 +28,6 @@ This repository implements several neural operator architectures:
 - **Architecture**: Lifting → FNO blocks → projection
 - **Spectral operations**: FFT → multiply in frequency domain → IFFT
 - **Modes**: Tuple (modes_x, modes_y) for low-frequency modes
-
-### MRBNO v3/v5
-
-- **Input channels**: Handles arbitrary number via encoder/decoder structure
-- **Architecture**: Separate input and output PCA bases, more flexible basis selection
-- **Key difference**: Can use input basis for encoder and output basis for decoder independently
 
 ## Datasets
 
@@ -160,15 +156,16 @@ conda activate test_fenics  # or appropriate environment with dolfin
 
 ## Model Comparison
 
-| Model | Spectral Basis | Input Channels | Output Channels |
-|-------|---------------|----------------|-----------------|
-| FNO | Fourier | Arbitrary (via lifting) | Arbitrary (via projection) |
-| MRBNO Lift Simple | PCA (single basis) | Arbitrary (via lifting) | Arbitrary (via projection) |
-| MRBNO v3/v5 | PCA (separate input/output) | Arbitrary (via encoder) | Arbitrary (via decoder) |
+| Model | Spectral Basis | Architecture |
+|-------|---------------|--------------|
+| FNO | Fourier | Lifting → FNO blocks → projection |
+| MRBNO | PCA (separate input/output bases) | Multi-stage basis transition with scalar gates |
+| PCANet | PCA (coefficient space) | Neural network operating directly in PCA space |
 
 ## Notes
 
-- MRBNO Lift Simple uses input PCA for Helmholtz (1 input channel, 2 output channels) and output PCA for nonlinear (2 input channels, 1 output channel) to match hidden representation spatial dimensions
+- MRBNO uses separate input and output PCA bases, with k_in and k_out computed from epsilon cutoff
 - All checkpoints and logs are saved to `$SCRATCH` to avoid home directory quota issues
 - Datasets are generated with 10000 samples by default
+- Complexity analysis script supports two sweep versions: fixed width×k and fixed width×(1/epsilon)
 
