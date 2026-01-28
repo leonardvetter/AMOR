@@ -14,28 +14,35 @@ import sys
 import os
 from timeit import default_timer
 
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'models'))
+
 from geofno_loader import prepare_geofno_data
-from data_utils import compute_pca_for_model
-from MRBNO_lift_irregular import MRBNOLiftIrregular
 from losses import LpLoss
+from MRBNO import MRBNO
+from PCAReducer import PCAReducerMultiChannel
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device):
+def train_epoch(model, dataloader, optimizer, criterion, device, dataset_type):
     """Train for one epoch."""
     model.train()
     total_loss = 0.0
     num_batches = 0
-    has_material = hasattr(model, 'use_material_conditioning') and model.use_material_conditioning
     
     for batch in dataloader:
         batch_data, batch_target, batch_material = batch
         batch_data = batch_data.to(device)
         batch_target = batch_target.to(device)
         
-        batch_material = batch_material.to(device) if has_material and batch_material.numel() > 0 else None
+        # Reshape to 4D for new MRBNO model
+        batch_data_4d = reshape_to_4d(batch_data, dataset_type)
+        batch_target_4d = reshape_to_4d(batch_target, dataset_type)
         
         optimizer.zero_grad()
-        output = model(batch_data, material_props=batch_material)
+        output_4d = model(batch_data_4d)
+        
+        # Reshape back to 3D for loss computation
+        output = reshape_from_4d(output_4d, dataset_type, batch_target.shape)
         loss = criterion(output, batch_target)
         loss.backward()
         optimizer.step()
@@ -46,12 +53,11 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
     return total_loss / num_batches if num_batches > 0 else 0.0
 
 
-def validate(model, dataloader, criterion, device):
+def validate(model, dataloader, criterion, device, dataset_type):
     """Validate model."""
     model.eval()
     total_loss = 0.0
     num_batches = 0
-    has_material = hasattr(model, 'use_material_conditioning') and model.use_material_conditioning
     
     with torch.no_grad():
         for batch in dataloader:
@@ -59,9 +65,14 @@ def validate(model, dataloader, criterion, device):
             batch_data = batch_data.to(device)
             batch_target = batch_target.to(device)
             
-            batch_material = batch_material.to(device) if has_material and batch_material.numel() > 0 else None
+            # Reshape to 4D for new MRBNO model
+            batch_data_4d = reshape_to_4d(batch_data, dataset_type)
+            batch_target_4d = reshape_to_4d(batch_target, dataset_type)
             
-            output = model(batch_data, material_props=batch_material)
+            output_4d = model(batch_data_4d)
+            
+            # Reshape back to 3D for loss computation
+            output = reshape_from_4d(output_4d, dataset_type, batch_target.shape)
             loss = criterion(output, batch_target)
             
             total_loss += loss.item()
@@ -70,51 +81,97 @@ def validate(model, dataloader, criterion, device):
     return total_loss / num_batches if num_batches > 0 else 0.0
 
 
-def validate_airfoil_downsampled(model, dataloader, criterion, device):
+def reshape_to_4d(data, dataset_type):
     """
-    Validate airfoil model on downsampled mesh (56x51 instead of 221x51).
+    Reshape 3D data (B, C, N) to 4D format (B, C, N, M) for new MRBNO model.
     
-    Downsampling: take every 4th row in X direction (r1=4), keep all in Y direction (r2=1).
-    Original: 221 x 51 = 11271 nodes
-    Downsampled: 56 x 51 = 2856 nodes
+    Args:
+        data: Input data of shape (B, C, N) or numpy array of shape (num_samples, C, N)
+        dataset_type: 'airfoil' or 'elasticity'
+    
+    Returns:
+        Reshaped data of shape (B, C, N, M)
     """
-    model.eval()
-    total_loss = 0.0
-    num_batches = 0
-    has_material = hasattr(model, 'use_material_conditioning') and model.use_material_conditioning
+    if isinstance(data, torch.Tensor):
+        data_np = data.cpu().numpy()
+        is_tensor = True
+    else:
+        data_np = data
+        is_tensor = False
     
-    original_height, original_width = 221, 51
-    downsampled_height, downsampled_width = 56, 51
-    r1, r2 = 4, 1
+    if dataset_type == 'airfoil':
+        # Airfoil: (B, 6, 11271) -> (B, 6, 221, 51)
+        B, C, N = data_np.shape
+        height, width = 221, 51
+        if N != height * width:
+            raise ValueError(f"Expected {height * width} nodes for airfoil, got {N}")
+        data_4d = data_np.reshape(B, C, height, width)
+    elif dataset_type == 'elasticity':
+        # Elasticity: (B, 2, 972) -> (B, 2, 36, 27) since 972 = 36 * 27
+        B, C, N = data_np.shape
+        # Find factors of N
+        if N == 972:
+            height, width = 36, 27
+        else:
+            # Try to find reasonable factors
+            import math
+            sqrt_n = int(math.sqrt(N))
+            for h in range(sqrt_n, 0, -1):
+                if N % h == 0:
+                    height, width = h, N // h
+                    break
+            else:
+                height, width = 1, N
+        data_4d = data_np.reshape(B, C, height, width)
+    else:
+        raise ValueError(f"Unknown dataset type: {dataset_type}")
     
-    downsampled_indices = []
-    for i in range(0, original_height, r1):
-        row_start = i * original_width
-        row_end = row_start + original_width
-        downsampled_indices.extend(range(row_start, row_end))
+    if is_tensor:
+        return torch.from_numpy(data_4d).to(data.device if isinstance(data, torch.Tensor) else 'cpu')
+    else:
+        return data_4d
+
+
+def reshape_from_4d(data_4d, dataset_type, original_shape):
+    """
+    Reshape 4D data (B, C, N, M) back to 3D format (B, C, N).
     
-    downsampled_indices = torch.tensor(downsampled_indices, dtype=torch.long, device=device)
+    Args:
+        data_4d: Input data of shape (B, C, N, M)
+        dataset_type: 'airfoil' or 'elasticity'
+        original_shape: Original shape (B, C, N)
     
-    with torch.no_grad():
-        for batch in dataloader:
-            batch_data, batch_target, batch_material = batch
-            batch_data = batch_data.to(device)
-            batch_target = batch_target.to(device)
-            
-            batch_material = batch_material.to(device) if has_material and batch_material.numel() > 0 else None
-            
-            output = model(batch_data, material_props=batch_material)
-            
-            batch_size = output.shape[0]
-            output_downsampled = output[:, :, downsampled_indices]
-            target_downsampled = batch_target[:, :, downsampled_indices]
-            
-            loss = criterion(output_downsampled, target_downsampled)
-            
-            total_loss += loss.item()
-            num_batches += 1
+    Returns:
+        Reshaped data of shape (B, C, N)
+    """
+    if isinstance(data_4d, torch.Tensor):
+        data_np = data_4d.detach().cpu().numpy()
+        is_tensor = True
+        device = data_4d.device
+    else:
+        data_np = data_4d
+        is_tensor = False
     
-    return total_loss / num_batches if num_batches > 0 else 0.0
+    B, C, N, M = data_np.shape
+    N_flat = N * M
+    data_3d = data_np.reshape(B, C, N_flat)
+    
+    # Ensure it matches original shape
+    if data_3d.shape != original_shape:
+        # Truncate or pad if needed
+        B_orig, C_orig, N_orig = original_shape
+        if N_flat > N_orig:
+            data_3d = data_3d[:, :, :N_orig]
+        elif N_flat < N_orig:
+            padding = np.zeros((B, C, N_orig - N_flat), dtype=data_3d.dtype)
+            data_3d = np.concatenate([data_3d, padding], axis=2)
+    
+    if is_tensor:
+        return torch.from_numpy(data_3d).to(device)
+    else:
+        return data_3d
+
+
 
 
 def main():
@@ -199,35 +256,48 @@ def main():
         material_prop_dim = material_props.shape[1]
         print(f"Material properties loaded: {material_prop_dim} properties per sample")
     
-    print("\nComputing PCA basis...")
-    train_data_np = train_dataset.data.numpy()
-    pca_components, pca_mean = compute_pca_for_model(
-        train_data_np,
-        n_modes=args.n_modes
-    )
+    print("\nPreparing data for new MRBNO model (4D format)...")
+    # Reshape training data to 4D format
+    train_data_3d = train_dataset.data.numpy()  # (num_samples, C, N)
+    train_targets_3d = train_dataset.targets.numpy()  # (num_samples, C_out, N)
     
-    print(f"PCA computed: {pca_components.shape[0]} modes, {pca_components.shape[1]} nodes")
+    train_data_4d = reshape_to_4d(train_data_3d, args.dataset_type)  # (num_samples, C, H, W)
+    train_targets_4d = reshape_to_4d(train_targets_3d, args.dataset_type)  # (num_samples, C_out, H, W)
+    
+    print(f"Reshaped data: {train_data_4d.shape} -> {train_targets_4d.shape}")
+    
+    print("\nFitting PCAReducerMultiChannel...")
+    rb = PCAReducerMultiChannel(
+        svd_solver="auto",
+        whiten=False,
+        random_state=42,
+        bc_weight=1.0,
+        boundary_threshold=0.1,
+        use_boundary_weighting=False
+    ).fit(train_data_4d, train_targets_4d)
+    
+    # Determine k_in and k_out from explained variance ratio
+    # Use cutoff to keep modes explaining 99.9% variance, but cap at n_modes
+    k_in, k_out = rb.k_from_cutoff(j_in=0.999, j_out=0.999)
+    k_in = min(k_in, args.n_modes)
+    k_out = min(k_out, args.n_modes)
+    
+    print(f"PCA modes: k_in={k_in}, k_out={k_out} (requested {args.n_modes})")
     
     print("\nCreating model...")
-    model = MRBNOLiftIrregular(
-        in_channels=train_dataset.data.shape[1],
-        out_channels=train_dataset.targets.shape[1],
+    model = MRBNO(
         width=args.width,
-        n_modes=min(args.n_modes, pca_components.shape[0]),
-        n_layers=args.n_layers,
-        add_coords=args.add_coords,
-        use_grid_skip=args.use_grid_skip,
-        use_input_skip=args.use_input_skip,
-        norm="group",
-        dropout_p=0.0,
-        residual=True,
-        pca_components=pca_components,
-        pca_mean=pca_mean,
-        mesh_coords=mesh_coords,
-        material_prop_dim=material_prop_dim,
-        num_nodes=mesh_coords.shape[0],
-        use_multiplicative_conditioning=args.use_multiplicative_conditioning,
-        material_adaptive_pca=args.use_material_adaptive_pca
+        rb=rb,
+        k_in=k_in,
+        k_out=k_out,
+        layers=args.n_layers,
+        dropout=0.0,
+        init_scale=0.1,
+        use_skip_connections=True,
+        use_batch_norm=True,
+        use_coordinates=args.add_coords,
+        add_constant_mode=False,
+        use_factorized_weights=False
     ).to(device)
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -279,9 +349,9 @@ def main():
     
     for epoch in range(args.epochs):
         t1 = default_timer()
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device, args.dataset_type)
         if val_loader is not None:
-            val_loss = validate(model, val_loader, criterion, device)
+            val_loss = validate(model, val_loader, criterion, device, args.dataset_type)
         else:
             val_loss = float('inf')
         scheduler.step()
@@ -319,6 +389,11 @@ def main():
                     'val_loss': val_loss,
                     'train_loss': train_loss,
                     'args': vars(args),
+                    'rb_shape': rb.shape_,
+                    'rb_n_channels': rb.n_channels,
+                    'rb_out_channels': rb.out_channels,
+                    'k_in': k_in,
+                    'k_out': k_out,
                 }, checkpoint_path)
             else:
                 patience_counter += 1
@@ -337,13 +412,8 @@ def main():
         print(f"Best validation loss: {best_val_loss:.6f}")
     
     print("\nEvaluating on test set...")
-    test_loss = validate(model, test_loader, criterion, device)
+    test_loss = validate(model, test_loader, criterion, device, args.dataset_type)
     print(f"Test loss (full mesh): {test_loss:.6f}")
-    
-    if args.dataset_type == 'airfoil':
-        print("\nComputing test loss on downsampled mesh (56x51)...")
-        test_loss_downsampled = validate_airfoil_downsampled(model, test_loader, criterion, device)
-        print(f"Test loss (downsampled 56x51): {test_loss_downsampled:.6f}")
 
 
 if __name__ == "__main__":

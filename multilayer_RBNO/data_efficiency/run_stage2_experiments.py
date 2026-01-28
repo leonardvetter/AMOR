@@ -4,6 +4,8 @@ Run Stage 2 experiments with different configurations:
 1. Stage 2 with frozen blocks (original)
 2. Stage 2 with unfrozen blocks (small LR for blocks)
 3. Stage 2 with 1% random samples from all trajectories
+
+Uses new MRBNO.py model architecture.
 """
 
 import sys
@@ -19,10 +21,10 @@ import psutil
 
 from train_two_stage_nonlinear import (
     load_nonlinear_dataset, PCAReducerMultiChannel, 
-    compute_pca_coefficients, train_stage2, train_stage2_unfrozen,
-    relative_l1_loss, relative_l2_error
+    train_stage2, train_stage2_unfrozen,
+    relative_l1_loss, relative_l2_error,
+    MRBNOStage1, MRBNOStage2
 )
-from mrbno_two_stage import MRBNOStage1, MRBNOStage2
 
 
 def get_memory_usage():
@@ -45,23 +47,24 @@ def evaluate_model(model, test_loader, device):
     return total_rel_l1 / len(test_loader.dataset), total_rel_l2 / len(test_loader.dataset)
 
 
-def load_stage1_model(stage1_path, rb, k_in, k_out, H, W, in_channels, out_channels, width, n_layers, device):
+def load_stage1_model(stage1_path, device):
     """Load Stage 1 model from checkpoint."""
-    pca_components_in = rb.input_components
-    pca_mean_in = rb.input_mean
-    pca_components_out = rb.output_components[0] if rb.output_components.ndim == 3 else rb.output_components
-    pca_mean_out = rb.output_mean[0] if rb.output_mean.ndim == 2 else rb.output_mean
+    checkpoint = torch.load(stage1_path, map_location=device)
+    
+    rb = checkpoint['rb']
+    k_in = checkpoint['k_in']
+    k_out = checkpoint['k_out']
+    width = checkpoint['width']
+    layers = checkpoint['layers']
     
     stage1_model = MRBNOStage1(
-        in_channels=in_channels, out_channels=out_channels, width=width,
-        n_modes_in=k_in, n_modes_out=k_out, n_layers=n_layers, H=H, W=W,
-        norm="group", dropout_p=0.0, residual=True,
-        pca_components_in=pca_components_in, pca_mean_in=pca_mean_in,
-        pca_components_out=pca_components_out, pca_mean_out=pca_mean_out
+        rb=rb, width=width, k_in=k_in, k_out=k_out, layers=layers,
+        dropout=0.0, use_batch_norm=True, use_skip_connections=True,
+        use_coordinates=False, add_constant_mode=False, use_factorized_weights=False
     )
-    stage1_model.load_state_dict(torch.load(stage1_path, map_location=device))
+    stage1_model.load_state_dict(checkpoint['model_state_dict'])
     stage1_model.to(device)
-    return stage1_model
+    return stage1_model, rb
 
 
 def main():
@@ -72,8 +75,6 @@ def main():
     parser.add_argument('--stage2_epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=2e-3)
     parser.add_argument('--lr_blocks', type=float, default=2e-5, help='Learning rate for blocks in unfrozen version')
-    parser.add_argument('--width', type=int, default=32)
-    parser.add_argument('--n_layers', type=int, default=4)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--skip_frozen', action='store_true', help='Skip frozen blocks experiment')
     parser.add_argument('--skip_unfrozen', action='store_true', help='Skip unfrozen blocks experiment')
@@ -100,20 +101,13 @@ def main():
     print(f"Detected channels: in={in_channels}, out={out_channels}")
     
     print("\n" + "="*70)
-    print("COMPUTING PCA")
-    print("="*70)
-    rb = PCAReducerMultiChannel().fit(X_train, Y_train)
-    k_in, k_out = rb.k_from_cutoff(j_in=0.99, j_out=0.99)
-    print(f"PCA modes for 99% variance: k_in={k_in}, k_out={k_out}")
-    
-    print("\n" + "="*70)
     print("LOADING STAGE 1 MODEL")
     print("="*70)
-    stage1_model = load_stage1_model(
-        args.stage1_checkpoint, rb, k_in, k_out, H, W,
-        in_channels, out_channels, args.width, args.n_layers, device
-    )
+    stage1_model, rb = load_stage1_model(args.stage1_checkpoint, device)
+    k_in = stage1_model.k_in
+    k_out = stage1_model.k_out
     print(f"Stage 1 model loaded from {args.stage1_checkpoint}")
+    print(f"k_in={k_in}, k_out={k_out}")
     
     test_loader = DataLoader(TensorDataset(
         torch.from_numpy(X_test).float(),
@@ -127,8 +121,7 @@ def main():
         print("EXPERIMENT 1: Stage 2 with frozen blocks (original)")
         print("="*70)
         
-        stage2_model_frozen = MRBNOStage2(stage1_model, in_channels=in_channels, out_channels=out_channels, 
-                                          width=args.width, add_coords=False, freeze_blocks=True)
+        stage2_model_frozen = MRBNOStage2(stage1_model, freeze_blocks=True)
         
         n_stage2_samples = min(1000, len(X_train))
         X_train_stage2 = X_train[:n_stage2_samples]
@@ -164,8 +157,7 @@ def main():
         print("EXPERIMENT 2: Stage 2 with unfrozen blocks (small LR for blocks)")
         print("="*70)
         
-        stage2_model_unfrozen = MRBNOStage2(stage1_model, in_channels=in_channels, out_channels=out_channels, 
-                                           width=args.width, add_coords=False, freeze_blocks=False)
+        stage2_model_unfrozen = MRBNOStage2(stage1_model, freeze_blocks=False)
         
         n_stage2_samples = min(1000, len(X_train))
         X_train_stage2 = X_train[:n_stage2_samples]
@@ -212,8 +204,7 @@ def main():
         print(f"Random sample: {len(X_train_random)} samples (1% of {len(X_train)})")
         print(f"Random sample shapes: X={X_train_random.shape}, Y={Y_train_random.shape}")
         
-        stage2_model_random = MRBNOStage2(stage1_model, in_channels=in_channels, out_channels=out_channels, 
-                                         width=args.width, add_coords=False, freeze_blocks=True)
+        stage2_model_random = MRBNOStage2(stage1_model, freeze_blocks=True)
         
         n_val_samples = min(200, len(X_val))
         X_val_stage2 = X_val[:n_val_samples]
@@ -252,4 +243,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

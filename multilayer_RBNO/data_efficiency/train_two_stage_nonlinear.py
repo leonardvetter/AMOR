@@ -5,7 +5,7 @@ Two-stage training on Nonlinear Diffusion dataset (nonlinear_diffusion_dataset_b
 Stage 1: Train in PCA space with loss on PCA coefficients.
 Stage 2: Fine-tune on real-space data with frozen blocks (or unfrozen with small LR).
 
-Handles arbitrary input/output channels.
+Uses new MRBNO.py model architecture.
 """
 
 import sys
@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import argparse
 from sklearn.decomposition import PCA
 
-from mrbno_two_stage import MRBNOStage1, MRBNOStage2
+from MRBNO import MRBNO
 
 
 def relative_l1_loss(pred, target, eps=1e-8):
@@ -41,21 +41,21 @@ def relative_l2_error(pred, target, eps=1e-8):
 
 
 class PCAReducerMultiChannel:
-    """Fit PCA bases for input/output tensors, computing PCA per channel."""
+    """Fit PCA bases for input/output tensors. Compatible with MRBNO.py."""
     
     def __init__(self, svd_solver="auto", whiten=False, random_state=None):
         self.svd_solver = svd_solver
         self.whiten = whiten
         self.random_state = random_state
-        self.pca_in_channels = None
-        self.pca_out_channels = None
+        self.pca_in = None
+        self.pca_out = None
         self.n_channels = None
         self.out_channels = None
         self.shape_ = None
         
     def fit(self, samples, solution):
         if samples.ndim != 4:
-            raise ValueError(f"Expected (num_samples, C_in, N, N), got {samples.shape}")
+            raise ValueError(f"Expected (num_samples, C_in, N, M), got {samples.shape}")
         num_samples, c_in, n, m = samples.shape
         self.n_channels = c_in
         self.shape_ = (n, m)
@@ -63,26 +63,19 @@ class PCAReducerMultiChannel:
         if solution.ndim == 3:
             solution = solution[:, None, :, :]
         if solution.ndim != 4:
-            raise ValueError(f"Expected (num_samples, C_out, N, N) or (num_samples, N, N), got {solution.shape}")
+            raise ValueError(f"Expected (num_samples, C_out, N, M) or (num_samples, N, M), got {solution.shape}")
         _, c_out, n_out, m_out = solution.shape
         if (n_out, m_out) != (n, m):
             raise ValueError("Input and output spatial dimensions must match")
         self.out_channels = c_out
         
-        self.pca_in_channels = []
-        for c in range(c_in):
-            x_channel = samples[:, c, :, :].reshape(num_samples, -1).astype(np.float32, copy=False)
-            pca_ch = PCA(n_components=None, svd_solver=self.svd_solver,
-                        whiten=self.whiten, random_state=self.random_state).fit(x_channel)
-            self.pca_in_channels.append(pca_ch)
+        x_in = samples.reshape(num_samples, -1).astype(np.float32, copy=False)
+        y_out = solution.reshape(num_samples, -1).astype(np.float32, copy=False)
         
-        self.pca_out_channels = []
-        for c in range(c_out):
-            y_channel = solution[:, c, :, :].reshape(num_samples, -1).astype(np.float32, copy=False)
-            pca_ch = PCA(n_components=None, svd_solver=self.svd_solver,
-                        whiten=self.whiten, random_state=self.random_state).fit(y_channel)
-            self.pca_out_channels.append(pca_ch)
-        
+        self.pca_in = PCA(n_components=None, svd_solver=self.svd_solver,
+                          whiten=self.whiten, random_state=self.random_state).fit(x_in)
+        self.pca_out = PCA(n_components=None, svd_solver=self.svd_solver,
+                           whiten=self.whiten, random_state=self.random_state).fit(y_out)
         return self
     
     @staticmethod
@@ -90,37 +83,64 @@ class PCAReducerMultiChannel:
         return int(np.searchsorted(np.cumsum(evr), cutoff) + 1)
     
     def k_from_cutoff(self, j_in=0.99, j_out=0.99):
-        if self.pca_in_channels is None or self.pca_out_channels is None:
+        if self.pca_in is None or self.pca_out is None:
             raise ValueError("PCAReducer must be fitted before requesting cutoffs")
-        evr_in = np.mean([pca.explained_variance_ratio_ for pca in self.pca_in_channels], axis=0)
-        evr_out = np.mean([pca.explained_variance_ratio_ for pca in self.pca_out_channels], axis=0)
-        k_in = self._k_from_cutoff(evr_in, j_in)
-        k_out = self._k_from_cutoff(evr_out, j_out)
+        k_in = self._k_from_cutoff(self.pca_in.explained_variance_ratio_, j_in)
+        k_out = self._k_from_cutoff(self.pca_out.explained_variance_ratio_, j_out)
         return k_in, k_out
+
+
+class MRBNOStage1(MRBNO):
+    """Stage 1: Train using MRBNO architecture. Loss computed in PCA space."""
     
-    @property
-    def input_components(self):
-        if self.pca_in_channels is None:
-            raise ValueError("PCAReducer has not been fitted")
-        return np.stack([pca.components_ for pca in self.pca_in_channels], axis=0)
+    def __init__(self, rb, width, k_in, k_out, layers, dropout=0.0, use_batch_norm=True,
+                 use_skip_connections=True, use_coordinates=False, add_constant_mode=False,
+                 use_factorized_weights=False):
+        super().__init__(
+            width=width, rb=rb, k_in=k_in, k_out=k_out, layers=layers,
+            dropout=dropout, init_scale=0.1, use_skip_connections=use_skip_connections,
+            use_batch_norm=use_batch_norm, use_coordinates=use_coordinates,
+            add_constant_mode=add_constant_mode, use_factorized_weights=use_factorized_weights
+        )
+        self.rb = rb
+        self.k_in = k_in
+        self.k_out = k_out
+
+
+class MRBNOStage2(MRBNO):
+    """Stage 2: Fine-tune in real space with pre-trained Stage 1 weights."""
     
-    @property
-    def output_components(self):
-        if self.pca_out_channels is None:
-            raise ValueError("PCAReducer has not been fitted")
-        return np.stack([pca.components_ for pca in self.pca_out_channels], axis=0)
-    
-    @property
-    def input_mean(self):
-        if self.pca_in_channels is None:
-            raise ValueError("PCAReducer has not been fitted")
-        return np.stack([pca.mean_ for pca in self.pca_in_channels], axis=0)
-    
-    @property
-    def output_mean(self):
-        if self.pca_out_channels is None:
-            raise ValueError("PCAReducer has not been fitted")
-        return np.stack([pca.mean_ for pca in self.pca_out_channels], axis=0)
+    def __init__(self, stage1_model, freeze_blocks=True):
+        super().__init__(
+            width=stage1_model.width,
+            rb=stage1_model.rb,
+            k_in=stage1_model.k_in,
+            k_out=stage1_model.k_out,
+            layers=stage1_model.num_layers,
+            dropout=0.0,
+            init_scale=0.1,
+            use_skip_connections=stage1_model.use_skip_connections,
+            use_batch_norm=stage1_model.use_batch_norm,
+            use_coordinates=stage1_model.use_coordinates,
+            add_constant_mode=False,
+            use_factorized_weights=False
+        )
+        
+        self.load_state_dict(stage1_model.state_dict(), strict=False)
+        
+        if freeze_blocks:
+            for param in self.block0.parameters():
+                param.requires_grad = False
+            for param in self.block1.parameters():
+                param.requires_grad = False
+            for param in self.blocks.parameters():
+                param.requires_grad = False
+            for param in self.gate0.parameters():
+                param.requires_grad = False
+            for param in self.gate1.parameters():
+                param.requires_grad = False
+            for param in self.gates.parameters():
+                param.requires_grad = False
 
 
 def load_nonlinear_dataset(data_path):
@@ -177,49 +197,31 @@ def load_nonlinear_dataset(data_path):
     return (X_train, Y_train, X_val, Y_val, X_test, Y_test), (x_mean, x_std, y_mean, y_std)
 
 
-def compute_pca_coefficients(X, Y, rb, n_modes_in, n_modes_out):
-    """Convert spatial data to PCA coefficients per channel."""
-    num_samples, n_channels, H, W = X.shape
-    _, out_channels, _, _ = Y.shape
-    
-    X_pca_list = []
-    Y_pca_list = []
-    
-    batch_size = 1000
-    for i in range(0, len(X), batch_size):
-        X_batch = X[i:i+batch_size]
-        Y_batch = Y[i:i+batch_size]
-        
-        X_pca_channels = []
-        for c in range(n_channels):
-            X_channel = X_batch[:, c, :, :].reshape(len(X_batch), -1)
-            X_channel_centered = X_channel - rb.pca_in_channels[c].mean_
-            X_pca_ch = X_channel_centered @ rb.pca_in_channels[c].components_[:n_modes_in].T
-            X_pca_channels.append(X_pca_ch)
-        X_pca_batch = np.stack(X_pca_channels, axis=1)
-        
-        Y_pca_channels = []
-        for c in range(out_channels):
-            Y_channel = Y_batch[:, c, :, :].reshape(len(Y_batch), -1)
-            Y_channel_centered = Y_channel - rb.pca_out_channels[c].mean_
-            Y_pca_ch = Y_channel_centered @ rb.pca_out_channels[c].components_[:n_modes_out].T
-            Y_pca_channels.append(Y_pca_ch)
-        Y_pca_batch = np.stack(Y_pca_channels, axis=1)
-        
-        X_pca_list.append(X_pca_batch)
-        Y_pca_list.append(Y_pca_batch)
-    
-    X_pca = np.concatenate(X_pca_list, axis=0)
-    Y_pca = np.concatenate(Y_pca_list, axis=0)
-    
-    return X_pca, Y_pca
+def spatial_to_pca_coefficients(X, rb, k_in):
+    """Convert spatial data to PCA coefficients."""
+    num_samples = X.shape[0]
+    X_flat = X.reshape(num_samples, -1)
+    X_centered = X_flat - rb.pca_in.mean_
+    X_pca = X_centered @ rb.pca_in.components_[:k_in].T
+    return X_pca
+
+def spatial_to_pca_coefficients_output(Y, rb, k_out):
+    """Convert spatial output data to PCA coefficients."""
+    num_samples = Y.shape[0]
+    Y_flat = Y.reshape(num_samples, -1)
+    Y_centered = Y_flat - rb.pca_out.mean_
+    Y_pca = Y_centered @ rb.pca_out.components_[:k_out].T
+    return Y_pca
 
 
-def train_stage1(model, train_loader, val_loader, epochs, lr, device):
-    """Train Stage 1 model in PCA space."""
+def train_stage1(model, train_loader, val_loader, rb, k_out, epochs, lr, device):
+    """Train Stage 1 model. Loss computed in PCA space."""
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    
+    pca_out_mean = torch.from_numpy(rb.pca_out.mean_).float().to(device)
+    pca_out_components = torch.from_numpy(rb.pca_out.components_[:k_out]).float().to(device)
     
     best_val_loss = float('inf')
     best_epoch = 0
@@ -231,13 +233,23 @@ def train_stage1(model, train_loader, val_loader, epochs, lr, device):
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
-            pred = model(xb)
-            loss = relative_l1_loss(pred, yb)
+            pred_spatial = model(xb)
+            
+            pred_flat = pred_spatial.view(pred_spatial.size(0), -1)
+            yb_flat = yb.view(yb.size(0), -1)
+            
+            pred_centered = pred_flat - pca_out_mean
+            yb_centered = yb_flat - pca_out_mean
+            
+            pred_pca = pred_centered @ pca_out_components.T
+            yb_pca = yb_centered @ pca_out_components.T
+            
+            loss = relative_l1_loss(pred_pca, yb_pca)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
             optimizer.step()
             train_loss += loss.item() * xb.size(0)
-            train_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
+            train_rel_l2 += relative_l2_error(pred_pca, yb_pca) * xb.size(0)
         train_loss /= len(train_loader.dataset)
         train_rel_l2 /= len(train_loader.dataset)
         
@@ -247,10 +259,20 @@ def train_stage1(model, train_loader, val_loader, epochs, lr, device):
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
-                pred = model(xb)
-                loss = relative_l1_loss(pred, yb)
+                pred_spatial = model(xb)
+                
+                pred_flat = pred_spatial.view(pred_spatial.size(0), -1)
+                yb_flat = yb.view(yb.size(0), -1)
+                
+                pred_centered = pred_flat - pca_out_mean
+                yb_centered = yb_flat - pca_out_mean
+                
+                pred_pca = pred_centered @ pca_out_components.T
+                yb_pca = yb_centered @ pca_out_components.T
+                
+                loss = relative_l1_loss(pred_pca, yb_pca)
                 val_loss += loss.item() * xb.size(0)
-                val_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
+                val_rel_l2 += relative_l2_error(pred_pca, yb_pca) * xb.size(0)
         val_loss /= len(val_loader.dataset)
         val_rel_l2 /= len(val_loader.dataset)
         
@@ -322,14 +344,14 @@ def train_stage2_unfrozen(model, train_loader, val_loader, epochs, lr, lr_blocks
     """Train Stage 2 model in real space with all parameters trainable.
     
     Blocks (PCA space parameters) use smaller learning rate lr_blocks.
-    Real-space layers (fc0, fc2) use learning rate lr.
+    Real-space layers (lift, proj, skip) use learning rate lr.
     """
     model.to(device)
     
     block_params = []
     real_space_params = []
     for name, param in model.named_parameters():
-        if 'blocks' in name:
+        if any(x in name for x in ['block0', 'block1', 'blocks', 'gate0', 'gate1', 'gates']):
             block_params.append(param)
         else:
             real_space_params.append(param)
@@ -399,7 +421,7 @@ if __name__ == '__main__':
     parser.add_argument('--stage2_epochs', type=int, default=100, help='Stage 2 epochs')
     parser.add_argument('--lr', type=float, default=2e-3, help='Learning rate')
     parser.add_argument('--width', type=int, default=32, help='Model width')
-    parser.add_argument('--n_layers', type=int, default=4, help='Number of layers')
+    parser.add_argument('--layers', type=int, default=4, help='Number of layers')
     parser.add_argument('--device', type=str, default='cuda', help='Device')
     parser.add_argument('--checkpoint_dir', type=str, default=None, help='Checkpoint directory (default: $SCRATCH/checkpoints)')
     args = parser.parse_args()
@@ -433,42 +455,38 @@ if __name__ == '__main__':
     print(f"PCA modes for 99% variance: k_in={k_in}, k_out={k_out}")
     
     print("\n" + "="*70)
-    print("STAGE 1: Training in PCA space")
+    print("STAGE 1: Training in real space, loss in PCA space")
     print("="*70)
     
-    X_train_pca, Y_train_pca = compute_pca_coefficients(X_train, Y_train, rb, k_in, k_out)
-    X_val_pca, Y_val_pca = compute_pca_coefficients(X_val, Y_val, rb, k_in, k_out)
-    
-    train_loader_pca = DataLoader(TensorDataset(
-        torch.from_numpy(X_train_pca).float(),
-        torch.from_numpy(Y_train_pca).float()
+    train_loader = DataLoader(TensorDataset(
+        torch.from_numpy(X_train).float(),
+        torch.from_numpy(Y_train).float()
     ), batch_size=args.batch_size, shuffle=True)
     
-    val_loader_pca = DataLoader(TensorDataset(
-        torch.from_numpy(X_val_pca).float(),
-        torch.from_numpy(Y_val_pca).float()
+    val_loader = DataLoader(TensorDataset(
+        torch.from_numpy(X_val).float(),
+        torch.from_numpy(Y_val).float()
     ), batch_size=args.batch_size, shuffle=False)
     
-    pca_components_in = rb.input_components
-    pca_mean_in = rb.input_mean
-    pca_components_out = rb.output_components[0] if rb.output_components.ndim == 3 else rb.output_components
-    pca_mean_out = rb.output_mean[0] if rb.output_mean.ndim == 2 else rb.output_mean
-    
     stage1_model = MRBNOStage1(
-        in_channels=in_channels, out_channels=out_channels, width=args.width,
-        n_modes_in=k_in, n_modes_out=k_out, n_layers=args.n_layers, H=H, W=W,
-        norm="group", dropout_p=0.0, residual=True,
-        pca_components_in=pca_components_in, pca_mean_in=pca_mean_in,
-        pca_components_out=pca_components_out, pca_mean_out=pca_mean_out
+        rb=rb, width=args.width, k_in=k_in, k_out=k_out, layers=args.layers,
+        dropout=0.0, use_batch_norm=True, use_skip_connections=True,
+        use_coordinates=False, add_constant_mode=False, use_factorized_weights=False
     )
     
-    train_stage1(stage1_model, train_loader_pca, val_loader_pca, args.stage1_epochs, args.lr, device)
+    train_stage1(stage1_model, train_loader, val_loader, rb, k_out, args.stage1_epochs, args.lr, device)
     
     stage1_path = os.path.join(checkpoint_dir, f'stage1_nonlinear_{args.stage1_epochs}epochs.pt')
-    torch.save(stage1_model.state_dict(), stage1_path)
+    torch.save({
+        'model_state_dict': stage1_model.state_dict(),
+        'rb': rb,
+        'k_in': k_in,
+        'k_out': k_out,
+        'width': args.width,
+        'layers': args.layers
+    }, stage1_path)
     print(f"\nStage 1 checkpoint saved to {stage1_path}")
     
     print("\n" + "="*70)
     print("STAGE 1 TRAINING COMPLETE")
     print("="*70)
-

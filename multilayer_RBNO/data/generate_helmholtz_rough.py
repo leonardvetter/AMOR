@@ -100,6 +100,8 @@ def helmholtz_settings_rough():
 
 if __name__ == "__main__":
     import argparse
+    import fcntl
+    import time
     parser = argparse.ArgumentParser(description="Generate rough Helmholtz dataset")
     parser.add_argument("--num_samples", type=int, default=10000)
     args = parser.parse_args()
@@ -108,23 +110,72 @@ if __name__ == "__main__":
     output_dir = os.path.join(scratch, 'data')
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, 'helmholtz_dataset_rough.npz')
+    lock_file = os.path.join(output_dir, 'helmholtz_dataset_rough.lock')
+    
+    # Process locking to ensure only one process per dataset
+    lock_fd = None
+    try:
+        lock_fd = open(lock_file, 'w')
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_fd.write(str(os.getpid()))
+        lock_fd.flush()
+    except IOError:
+        print(f"Another process is already running for {output_file}. Exiting.", flush=True)
+        if lock_fd:
+            lock_fd.close()
+        import sys
+        sys.exit(1)
+    
+    # Check for recovery file (.tmp.npz) first - np.savez_compressed adds .npz extension
+    temp_file = output_file + '.tmp.npz'
+    if os.path.exists(temp_file):
+        print(f"Found temporary file at {temp_file}, attempting recovery...", flush=True)
+        try:
+            test_data = np.load(temp_file, allow_pickle=False)
+            test_samples = len(test_data['m'])
+            test_data.close()
+            print(f"Temporary file is valid with {test_samples} samples. Recovering...", flush=True)
+            if os.path.exists(output_file):
+                backup_file = output_file + '.corrupted_backup'
+                print(f"Backing up corrupted main file to {backup_file}", flush=True)
+                try:
+                    os.rename(output_file, backup_file)
+                except:
+                    pass
+            os.rename(temp_file, output_file)
+            print(f"Recovery successful. Using recovered file with {test_samples} samples.", flush=True)
+        except Exception as e:
+            print(f"Temporary file is also corrupted ({e}). Will try main file.", flush=True)
     
     start_idx = 0
     if os.path.exists(output_file):
-        print(f"Existing dataset found at {output_file}")
-        try:
-            existing_data = np.load(output_file)
-            existing_samples = len(existing_data['m'])
-            print(f"Found {existing_samples} existing samples")
-            if existing_samples >= args.num_samples:
-                print(f"Dataset already complete ({existing_samples} >= {args.num_samples}). Exiting.")
-                import sys
-                sys.exit(0)
-            start_idx = existing_samples
-            print(f"Resuming from sample {start_idx}")
-        except Exception as e:
-            print(f"Warning: Could not load existing dataset ({e}). Starting from scratch.")
-            start_idx = 0
+        print(f"Existing dataset found at {output_file}", flush=True)
+        existing_samples = None
+        max_retries = 50
+        retry_delay = 5
+        for attempt in range(max_retries):
+            try:
+                existing_data = np.load(output_file, allow_pickle=False)
+                existing_samples = len(existing_data['m'])
+                existing_data.close()
+                print(f"Found {existing_samples} existing samples", flush=True)
+                if existing_samples >= args.num_samples:
+                    print(f"Dataset already complete ({existing_samples} >= {args.num_samples}). Exiting.", flush=True)
+                    import sys
+                    sys.exit(0)
+                start_idx = existing_samples
+                print(f"Resuming from sample {start_idx}", flush=True)
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"Attempt {attempt + 1}/{max_retries}: Could not read file ({e}). Retrying in {retry_delay} seconds...", flush=True)
+                    time.sleep(retry_delay)
+                else:
+                    print(f"ERROR: Could not load existing dataset after {max_retries} attempts ({e}).", flush=True)
+                    print(f"File exists but cannot be read - this may indicate corruption.", flush=True)
+                    print(f"EXITING to prevent data loss. Please manually recover the file or remove it if you want to start from scratch.", flush=True)
+                    import sys
+                    sys.exit(1)
     
     settings = helmholtz_settings_rough()
     Vh, pde, prior, observable = setup_helmholtz_problem(settings)
@@ -137,23 +188,39 @@ if __name__ == "__main__":
         u_real_dataset = []
         u_imag_dataset = []
     else:
-        existing_data = np.load(output_file)
-        m_dataset = list(existing_data['m'])
-        u_real_dataset = list(existing_data['u_real'])
-        u_imag_dataset = list(existing_data['u_imag'])
-        existing_data.close()
+        max_retries = 50
+        retry_delay = 5
+        loaded = False
+        for attempt in range(max_retries):
+            try:
+                existing_data = np.load(output_file, allow_pickle=False)
+                m_dataset = list(existing_data['m'])
+                u_real_dataset = list(existing_data['u_real'])
+                u_imag_dataset = list(existing_data['u_imag'])
+                existing_data.close()
+                loaded = True
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"Attempt {attempt + 1}/{max_retries}: Could not load data ({e}). Retrying in {retry_delay} seconds...", flush=True)
+                    time.sleep(retry_delay)
+                else:
+                    print(f"ERROR: Could not load existing data after {max_retries} attempts ({e}).", flush=True)
+                    print(f"EXITING to prevent data loss. Please manually recover the file or remove it if you want to start from scratch.", flush=True)
+                    import sys
+                    sys.exit(1)
     
     np.random.seed(settings["seed"] + start_idx)
     
     if start_idx == 0:
-        print(f"Generating {args.num_samples} Helmholtz samples...")
+        print(f"Generating {args.num_samples} Helmholtz samples...", flush=True)
     else:
         remaining = args.num_samples - start_idx
-        print(f"Generating {remaining} additional samples (will have {args.num_samples} total)...")
+        print(f"Generating {remaining} additional samples (will have {args.num_samples} total)...", flush=True)
     
     for i in range(start_idx, args.num_samples):
         if (i + 1) % 100 == 0:
-            print(f"Progress: {i+1}/{args.num_samples}")
+            print(f"Progress: {i+1}/{args.num_samples}", flush=True)
         
         noise = dl.Vector()
         prior.init_vector(noise, "noise")
@@ -176,20 +243,53 @@ if __name__ == "__main__":
         u_real_dataset.append(u_real_grid)
         u_imag_dataset.append(u_imag_grid)
         
-        if (i + 1) % 100 == 0 or (i + 1) == args.num_samples:
-            np.savez_compressed(
-                output_file,
-                m=np.array(m_dataset),
-                u_real=np.array(u_real_dataset),
-                u_imag=np.array(u_imag_dataset),
-                nx=nx,
-                box=box,
-                num_samples=len(m_dataset),
-                settings=settings
-            )
-            file_size = os.path.getsize(output_file) / (1024**2)
-            print(f"Saved {len(m_dataset)} samples. File size: {file_size:.2f} MB")
+        if (i + 1) % 25 == 0 or (i + 1) == args.num_samples:
+            # Atomic save: write to temp file then rename
+            # np.savez_compressed adds .npz extension, so we need to account for that
+            temp_file_base = output_file + '.tmp'
+            temp_file = temp_file_base + '.npz'
+            try:
+                np.savez_compressed(
+                    temp_file_base,
+                    m=np.array(m_dataset),
+                    u_real=np.array(u_real_dataset),
+                    u_imag=np.array(u_imag_dataset),
+                    nx=nx,
+                    box=box,
+                    num_samples=len(m_dataset),
+                    settings=settings
+                )
+                # Verify temp file exists (np.savez_compressed adds .npz extension)
+                if not os.path.exists(temp_file):
+                    raise IOError(f"Temp file {temp_file} was not created")
+                # Verify temp file can be read
+                test_load = np.load(temp_file, allow_pickle=False)
+                test_load.close()
+                # Atomic rename: remove old file if it exists, then rename temp
+                if os.path.exists(output_file):
+                    os.remove(output_file)
+                os.rename(temp_file, output_file)
+                if not os.path.exists(output_file):
+                    raise IOError(f"Rename failed: {output_file} does not exist after rename")
+                file_size = os.path.getsize(output_file) / (1024**2)
+                print(f"Saved {len(m_dataset)} samples. File size: {file_size:.2f} MB", flush=True)
+            except Exception as e:
+                print(f"ERROR saving at sample {i+1}: {e}", flush=True)
+                # Clean up temp files if they exist
+                for cleanup_file in [temp_file, temp_file_base]:
+                    if os.path.exists(cleanup_file):
+                        try:
+                            os.remove(cleanup_file)
+                        except:
+                            pass
+                raise
     
-    print(f"Dataset saved to {output_file}, {len(m_dataset)} samples")
+    print(f"Dataset saved to {output_file}, {len(m_dataset)} samples", flush=True)
+    if lock_fd:
+        lock_fd.close()
+        try:
+            os.remove(lock_file)
+        except:
+            pass
 
 

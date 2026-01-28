@@ -15,9 +15,77 @@ import os
 import sys
 import argparse
 
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'models'))
+
 from geofno_loader import prepare_geofno_data
-from data_utils import compute_pca_for_model
-from MRBNO_lift_irregular import MRBNOLiftIrregular
+from MRBNO import MRBNO
+from PCAReducer import PCAReducerMultiChannel
+
+
+def reshape_to_4d(data, dataset_type):
+    """Reshape 3D data (B, C, N) to 4D format (B, C, N, M) for new MRBNO model."""
+    if isinstance(data, torch.Tensor):
+        data_np = data.cpu().numpy()
+        is_tensor = True
+        device = data.device
+    else:
+        data_np = data
+        is_tensor = False
+    
+    if dataset_type == 'airfoil':
+        B, C, N = data_np.shape
+        height, width = 221, 51
+        data_4d = data_np.reshape(B, C, height, width)
+    elif dataset_type == 'elasticity':
+        B, C, N = data_np.shape
+        if N == 972:
+            height, width = 36, 27
+        else:
+            import math
+            sqrt_n = int(math.sqrt(N))
+            for h in range(sqrt_n, 0, -1):
+                if N % h == 0:
+                    height, width = h, N // h
+                    break
+            else:
+                height, width = 1, N
+        data_4d = data_np.reshape(B, C, height, width)
+    else:
+        raise ValueError(f"Unknown dataset type: {dataset_type}")
+    
+    if is_tensor:
+        return torch.from_numpy(data_4d).to(device)
+    else:
+        return data_4d
+
+
+def reshape_from_4d(data_4d, dataset_type, original_shape):
+    """Reshape 4D data (B, C, N, M) back to 3D format (B, C, N)."""
+    if isinstance(data_4d, torch.Tensor):
+        data_np = data_4d.detach().cpu().numpy()
+        is_tensor = True
+        device = data_4d.device
+    else:
+        data_np = data_4d
+        is_tensor = False
+    
+    B, C, N, M = data_np.shape
+    N_flat = N * M
+    data_3d = data_np.reshape(B, C, N_flat)
+    
+    if data_3d.shape != original_shape:
+        B_orig, C_orig, N_orig = original_shape
+        if N_flat > N_orig:
+            data_3d = data_3d[:, :, :N_orig]
+        elif N_flat < N_orig:
+            padding = np.zeros((B, C, N_orig - N_flat), dtype=data_3d.dtype)
+            data_3d = np.concatenate([data_3d, padding], axis=2)
+    
+    if is_tensor:
+        return torch.from_numpy(data_3d).to(device)
+    else:
+        return data_3d
 
 
 def load_model(checkpoint_path, dataset_type, device):
@@ -39,33 +107,40 @@ def load_model(checkpoint_path, dataset_type, device):
     train_dataset = datasets['train']
     test_dataset = datasets['test']
     
-    material_prop_dim = None
-    if material_props is not None:
-        material_prop_dim = material_props.shape[1]
+    # Reshape training data to 4D format
+    train_data_3d = train_dataset.data.numpy()
+    train_targets_3d = train_dataset.targets.numpy()
+    train_data_4d = reshape_to_4d(train_data_3d, dataset_type)
+    train_targets_4d = reshape_to_4d(train_targets_3d, dataset_type)
     
-    train_data_np = train_dataset.data.numpy()
-    pca_components, pca_mean = compute_pca_for_model(
-        train_data_np,
-        n_modes=args['n_modes']
-    )
+    # Recreate PCAReducerMultiChannel
+    rb = PCAReducerMultiChannel(
+        svd_solver="auto",
+        whiten=False,
+        random_state=42,
+        bc_weight=1.0,
+        boundary_threshold=0.1,
+        use_boundary_weighting=False
+    ).fit(train_data_4d, train_targets_4d)
     
-    model = MRBNOLiftIrregular(
-        in_channels=train_dataset.data.shape[1],
-        out_channels=train_dataset.targets.shape[1],
+    # Get k_in and k_out from checkpoint
+    k_in = checkpoint.get('k_in', args.get('n_modes', 144))
+    k_out = checkpoint.get('k_out', args.get('n_modes', 144))
+    
+    # Create model
+    model = MRBNO(
         width=args['width'],
-        n_modes=min(args['n_modes'], pca_components.shape[0]),
-        n_layers=args['n_layers'],
-        add_coords=args.get('add_coords', True),
-        use_grid_skip=args.get('use_grid_skip', False),
-        use_input_skip=args.get('use_input_skip', False),
-        norm="group",
-        dropout_p=0.0,
-        residual=True,
-        pca_components=pca_components,
-        pca_mean=pca_mean,
-        mesh_coords=mesh_coords,
-        material_prop_dim=material_prop_dim,
-        num_nodes=mesh_coords.shape[0]
+        rb=rb,
+        k_in=k_in,
+        k_out=k_out,
+        layers=args['n_layers'],
+        dropout=0.0,
+        init_scale=0.1,
+        use_skip_connections=True,
+        use_batch_norm=True,
+        use_coordinates=args.get('add_coords', True),
+        add_constant_mode=False,
+        use_factorized_weights=False
     ).to(device)
     
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -79,13 +154,12 @@ def plot_elasticity_prediction(model, test_dataset, mesh_coords, material_props,
     sample_data = test_dataset.data[sample_idx:sample_idx+1].to(device)
     sample_target = test_dataset.targets[sample_idx:sample_idx+1].to(device)
     
-    if material_props is not None:
-        sample_material = test_dataset.material_props[sample_idx:sample_idx+1].to(device)
-    else:
-        sample_material = None
+    # Reshape to 4D for new MRBNO model
+    sample_data_4d = reshape_to_4d(sample_data, 'elasticity')
     
     with torch.no_grad():
-        prediction = model(sample_data, material_props=sample_material)
+        prediction_4d = model(sample_data_4d)
+        prediction = reshape_from_4d(prediction_4d, 'elasticity', sample_target.shape)
     
     input_xy = sample_data[0].cpu().numpy().T
     pred_sigma = prediction[0, 0].cpu().numpy()
@@ -166,8 +240,12 @@ def plot_airfoil_prediction(model, test_dataset, mesh_coords, sample_idx, device
     sample_data = test_dataset.data[sample_idx:sample_idx+1].to(device)
     sample_target = test_dataset.targets[sample_idx:sample_idx+1].to(device)
     
+    # Reshape to 4D for new MRBNO model
+    sample_data_4d = reshape_to_4d(sample_data, 'airfoil')
+    
     with torch.no_grad():
-        prediction = model(sample_data, material_props=None)
+        prediction_4d = model(sample_data_4d)
+        prediction = reshape_from_4d(prediction_4d, 'airfoil', sample_target.shape)
     
     pred_q = prediction[0, 0].cpu().numpy()
     true_q = sample_target[0, 0].cpu().numpy()

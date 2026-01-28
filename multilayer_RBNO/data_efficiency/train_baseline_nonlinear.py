@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Baseline training: Train MRBNOLiftSimple on full uncompressed dataset.
+Baseline training: Train MRBNO on full uncompressed dataset.
 Uses same hyperparameters and training schedule as two-stage training.
+Uses new MRBNO.py model architecture.
 """
 
 import sys
@@ -18,12 +19,7 @@ from train_two_stage_nonlinear import (
     load_nonlinear_dataset, PCAReducerMultiChannel,
     relative_l1_loss, relative_l2_error
 )
-
-try:
-    from MRBNO_lift_simple import MRBNOLiftSimple
-except ImportError:
-    print("Error: Could not import MRBNOLiftSimple")
-    sys.exit(1)
+from MRBNO import MRBNO
 
 
 def train_baseline(model, train_loader, val_loader, test_loader, epochs, lr, device):
@@ -96,7 +92,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=700)
     parser.add_argument('--lr', type=float, default=2e-3)
     parser.add_argument('--width', type=int, default=32)
-    parser.add_argument('--n_layers', type=int, default=4)
+    parser.add_argument('--layers', type=int, default=4)
     parser.add_argument('--device', type=str, default='cuda')
     args = parser.parse_args()
     
@@ -127,18 +123,15 @@ def main():
     k_in, k_out = rb.k_from_cutoff(j_in=0.99, j_out=0.99)
     print(f"PCA modes for 99% variance: k_in={k_in}, k_out={k_out}")
     
-    pca_components = rb.output_components[0] if rb.output_components.ndim == 3 else rb.output_components
-    pca_mean = rb.output_mean[0] if rb.output_mean.ndim == 2 else rb.output_mean
-    
     print("\n" + "="*70)
     print("BASELINE: Training on full dataset")
     print("="*70)
     
-    baseline_model = MRBNOLiftSimple(
-        in_channels=in_channels, out_channels=out_channels, width=args.width,
-        n_modes=k_out, n_layers=args.n_layers, add_coords=False,
-        norm="group", dropout_p=0.0, residual=True,
-        pca_components=pca_components, pca_mean=pca_mean
+    baseline_model = MRBNO(
+        width=args.width, rb=rb, k_in=k_in, k_out=k_out, layers=args.layers,
+        dropout=0.0, init_scale=0.1, use_skip_connections=True,
+        use_batch_norm=True, use_coordinates=False, add_constant_mode=False,
+        use_factorized_weights=False
     )
     
     train_loader = DataLoader(TensorDataset(
@@ -170,4 +163,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
