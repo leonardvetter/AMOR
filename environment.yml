@@ -1,0 +1,25 @@
+name: multilayer-RBNO_env
+channels:
+  - conda-forge
+  - pytorch # PyTorch's channel for better package resolution
+  - defaults
+dependencies:
+  - python=3.12
+  - pytorch=2.7.1 
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - seaborn
+  - jupyterlab
+  - ipykernel
+  - tqdm
+  - stable-baselines3
+  - torchvision
+  - wandb
+  - scikit-learn
+  - einops
+  - fenics-dolfin
+  - jax
+  - jaxtyping
+  

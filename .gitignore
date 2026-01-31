@@ -208,3 +208,15 @@ __marimo__/
 
 # Large dataset files
 *.npzMiniconda3-latest-Linux-x86_64.sh
+
+# Shell scripts
+*.sh
+
+# Vim swap files
+*.swp
+*.swo
+*~
+
+# JIT failure directories (FEniCS/Dolfin compilation artifacts)
+**/jitfailure*/
+jitfailure*/
