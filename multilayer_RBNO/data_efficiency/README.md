@@ -1,71 +1,107 @@
-# Data Efficiency Experiments
+# Two-Stage Training on Nonlinear Diffusion Dataset
 
-This directory contains two-stage training experiments for improved data efficiency.
+This directory contains code for two-stage training of MRBNO models on the nonlinear diffusion dataset (`nonlinear_diffusion_dataset_big.npz`).
 
-## Overview
+## Dataset
 
-The `mrbno_two_stage.py` model implements a two-stage training approach:
+- **Dataset**: `nonlinear_diffusion_dataset_big.npz` (20,000 samples)
+- **Input**: 2 channels (f, m), spatial dimensions 100×100
+- **Output**: 1 channel (u), spatial dimensions 100×100
+- **PDE**: -∇·(exp(m)∇u) = f
 
-1. **Stage 1**: Train entirely in PCA coefficient space (loss computed in PCA space)
-   - Removes real-space input/output layers (`fc0` and `fc2`)
-   - Trains blocks to learn mappings in PCA space
-   - Input/output are PCA coefficients directly
+## Training Approaches
 
-2. **Stage 2**: Fine-tune on real-space data
-   - Adds back real-space layers (`fc0` and `fc2`)
-   - Freezes pre-trained blocks from Stage 1
-   - Fine-tunes only the real-space layers
+### 1. Two-Stage Training
 
-## Key Difference from MRBNO_lift_simple
+**Stage 1**: Train in PCA coefficient space on 90% of train/val data
+- Model: `MRBNOStage1` (removes parts operating on original spatial data)
+- Loss: Relative L1 loss in PCA space
+- Output: PCA coefficients
 
-The two-stage model uses **separate input and output PCA bases**:
-- `pca_components_in`, `pca_mean_in`: For encoding input data
-- `pca_components_out`, `pca_mean_out`: For decoding output data
+**Stage 2**: Fine-tune complete MRBNO.py model on 10% of train/val data
+- Model: `MRBNOStage2` (complete MRBNO.py architecture)
+- Three versions:
+  - **Version 1**: Only new weights trained (blocks frozen)
+  - **Version 2**: All weights trained, higher LR for new weights (blocks LR = 0.1 × base LR)
+  - **Version 3**: All weights trained equally
+- Loss: Relative L1 loss in real space
 
-This allows the model to use different bases optimized for input and output distributions.
+### 2. Baseline Training
 
-## Key Files
+Train MRBNO.py directly on full 20k samples (one-stage training)
+- Model: Complete MRBNO.py
+- Loss: Relative L1 loss
+- All samples used for training
 
-- **`mrbno_two_stage.py`**: Two-stage MRBNO model implementation
-- **`train_two_stage_nonlinear.py`**: Training script for nonlinear diffusion dataset
-- **`train_two_stage_kolmogorov.py`**: Training script for Kolmogorov flow datasets
-- **`train_two_stage_well.py`**: Training script for well dataset
-- **`train_baseline_nonlinear.py`**: Baseline training (single-stage) for comparison
-- **`run_training_nonlinear.py`**: Main script to run two-stage training
-- **`run_stage2_experiments.py`**: Script to run Stage 2 fine-tuning experiments
-- **`run_training_with_metrics.py`**: Training with detailed metrics logging
+## Hyperparameters
+
+From `train_FNO_MRBNO_PCANet.ipynb`:
+- Batch size: 32
+- Learning rate: 2e-3
+- Epochs: 300 (with early stopping patience=50)
+- Width: 24
+- Layers: 4
+- Dropout: 0.0
+- Weight decay: 1e-4
+- Max gradient norm: 3.0
+- Optimizer: AdamW (betas=(0.9, 0.999), eps=1e-8)
+- Scheduler: CosineAnnealingLR (eta_min=0.0)
+- PCA modes: k_in=144, k_out=144 (99% variance cutoff)
 
 ## Usage
 
+### Stage 1 Training
+
 ```bash
-# Run two-stage training on nonlinear diffusion
-python run_training_nonlinear.py --stage1_epochs 600 --stage2_epochs 200
-
-# Run baseline for comparison
-python train_baseline_nonlinear.py --epochs 300
-
-# Run Stage 2 experiments
-python run_stage2_experiments.py
+python3 train_stage1.py --data_path $SCRATCH/data/nonlinear_diffusion_dataset_big.npz \
+                        --batch_size 32 --epochs 300 --lr 2e-3 \
+                        --width 24 --layers 4 --k_in 144 --k_out 144
 ```
 
-## Model Architecture
+Checkpoint saved to: `$SCRATCH/checkpoints/stage1_final.pt`
 
-### Stage 1 (`MRBNOStage1`)
-- Input: PCA coefficients `(B, in_channels, n_modes_in)`
-- Output: PCA coefficients `(B, out_channels, n_modes_out)`
-- Decodes input PCA to spatial for blocks, encodes output back to PCA
-- Uses output PCA basis for blocks
+### Stage 2 Training
 
-### Stage 2 (`MRBNOStage2`)
-- Input: Real-space data `(B, in_channels, H, W)`
-- Output: Real-space data `(B, out_channels, H, W)`
-- Uses frozen blocks from Stage 1
-- Only `fc0` and `fc2` are trainable
+```bash
+# Version 1: Frozen blocks
+python3 train_stage2.py --stage1_checkpoint $SCRATCH/checkpoints/stage1_final.pt \
+                        --version 1 --batch_size 32 --epochs 300 --lr 2e-3
 
-## Differences from MRBNO_lift_simple
+# Version 2: Different LR for blocks
+python3 train_stage2.py --stage1_checkpoint $SCRATCH/checkpoints/stage1_final.pt \
+                        --version 2 --lr_blocks_factor 0.1 --batch_size 32 --epochs 300 --lr 2e-3
 
-1. **PCA bases**: Separate input/output bases vs single shared basis
-2. **Training**: Two-stage approach vs single-stage
-3. **Stage 1**: Operates entirely in PCA space vs real space
-4. **Flexibility**: Can use different numbers of modes for input/output
+# Version 3: Equal LR
+python3 train_stage2.py --stage1_checkpoint $SCRATCH/checkpoints/stage1_final.pt \
+                        --version 3 --batch_size 32 --epochs 300 --lr 2e-3
+```
 
+### Baseline Training
+
+```bash
+python3 train_baseline.py --data_path $SCRATCH/data/nonlinear_diffusion_dataset_big.npz \
+                           --batch_size 32 --epochs 300 --lr 2e-3 \
+                           --width 24 --layers 4 --k_in 144 --k_out 144
+```
+
+## Metrics
+
+All models report:
+- Relative L1 loss (training metric)
+- Relative L2 error (evaluation metric)
+- Metrics computed on train, validation, and test splits
+
+## Files
+
+- `train_two_stage.py`: Core training functions and model definitions
+- `train_stage1.py`: Stage 1 training script
+- `train_stage2.py`: Stage 2 training script (3 versions)
+- `train_baseline.py`: Baseline training script
+
+## Notes
+
+- Checkpoints are saved to `$SCRATCH/checkpoints/`
+- Data split: 70% train, 20% val, 10% test (from full dataset)
+- Stage 1 uses 90% of train/val (63% of total)
+- Stage 2 uses 10% of train/val (7% of total)
+- Test set (10% of total) used for final evaluation
