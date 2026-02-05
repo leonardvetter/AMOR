@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from typing import Tuple
 import os
 import sys
+import argparse
 
 # Patch numpy.asarray to handle JAX compatibility issue with NumPy 1.26.4
 _original_asarray = onp.asarray
@@ -41,15 +42,23 @@ import jax.numpy as jnp
 # Configuration
 # ============================================================================
 
-NUM_SAMPLES = 10000      # Number of dataset samples
-N = 100                 # Grid resolution (NxN)
-L = 1.0                 # Domain size [0,L]^2
+parser = argparse.ArgumentParser(description='Generate nonlinear diffusion dataset')
+parser.add_argument('--N', type=int, default=100, help='Grid resolution (NxN)')
+parser.add_argument('--num_samples', type=int, default=10000, help='Number of dataset samples')
+parser.add_argument('--output', type=str, default=None, help='Output filename (default: nonlinear_diffusion_dataset.npz)')
+args = parser.parse_args()
+
+NUM_SAMPLES = args.num_samples
+N = args.N
+L = 1.0
 scratch = os.environ.get('SCRATCH', '/tmp')
 output_dir = os.path.join(scratch, 'data')
 os.makedirs(output_dir, exist_ok=True)
-SAVE_PATH = os.path.join(output_dir, "nonlinear_diffusion_dataset.npz")  # Output file
+if args.output is None:
+    SAVE_PATH = os.path.join(output_dir, "nonlinear_diffusion_dataset.npz")
+else:
+    SAVE_PATH = os.path.join(output_dir, args.output)
 
-# Random seed
 os.environ.setdefault('JAX_TRACEBACK_FILTERING', 'off')
 KEY = jax.random.PRNGKey(356)
 
@@ -123,8 +132,13 @@ dx = L / N
 mesh = Grid2D(nx=N, ny=N, dx=dx, dy=dx)
 xc, yc = mesh.cellCenters
 
-print(f"Mesh setup: {N}x{N} grid, dx={dx:.4f}")
-print(f"Number of cells: {mesh.numberOfCells}")
+print(f"Configuration:")
+print(f"  Resolution: {N}x{N}")
+print(f"  Domain size: [0, {L}]^2")
+print(f"  Grid spacing: dx={dx:.4f}")
+print(f"  Number of cells: {mesh.numberOfCells}")
+print(f"  Number of samples: {NUM_SAMPLES}")
+print(f"  Output file: {SAVE_PATH}")
 
 # Check for existing dataset
 start_idx = 0

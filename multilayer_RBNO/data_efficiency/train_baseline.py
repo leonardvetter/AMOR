@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Baseline training: Train MRBNO.py directly on full 20k samples (one-stage).
+PCA is computed on ALL train/val data to match Stage 1 for fair weight comparison.
 """
 
 import sys
@@ -127,12 +128,14 @@ def main():
     parser = argparse.ArgumentParser(description='Baseline training on full dataset')
     parser.add_argument('--data_path', type=str, default='$SCRATCH/data/nonlinear_diffusion_dataset_big.npz')
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--epochs', type=int, default=300)
+    parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--lr', type=float, default=2e-3)
     parser.add_argument('--width', type=int, default=24)
     parser.add_argument('--layers', type=int, default=4)
     parser.add_argument('--k_in', type=int, default=144)
     parser.add_argument('--k_out', type=int, default=144)
+    parser.add_argument('--initial_checkpoint', type=str, default=None,
+                       help='Path to initial checkpoint to load weights from (before training starts)')
     parser.add_argument('--device', type=str, default='cuda')
     args = parser.parse_args()
     
@@ -161,10 +164,13 @@ def main():
     print(f"Test samples: {len(X_test)}")
     
     print("\n" + "="*70)
-    print("COMPUTING PCA FOR BLOCKS")
+    print("COMPUTING PCA ON ALL TRAIN/VAL DATA")
     print("="*70)
+    print("Note: PCA computed on all train/val data to match Stage 1")
     
-    rb = PCAReducerMultiChannel().fit(X_train, Y_train)
+    X_all_train_val = np.concatenate([X_train, X_val], axis=0)
+    Y_all_train_val = np.concatenate([Y_train, Y_val], axis=0)
+    rb = PCAReducerMultiChannel().fit(X_all_train_val, Y_all_train_val)
     if args.k_in is None or args.k_out is None:
         k_in, k_out = rb.k_from_cutoff(j_in=0.99, j_out=0.99)
     else:
@@ -181,6 +187,12 @@ def main():
         use_batch_norm=False, use_coordinates=False, add_constant_mode=False,
         use_factorized_weights=False
     )
+    
+    if args.initial_checkpoint and os.path.exists(args.initial_checkpoint):
+        print(f"\nLoading initial weights from: {args.initial_checkpoint}")
+        init_ckpt = torch.load(args.initial_checkpoint, map_location=device, weights_only=False)
+        model.load_state_dict(init_ckpt['model_state_dict'], strict=False)
+        print("Initial weights loaded (PCA space weights from Stage 1)")
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     

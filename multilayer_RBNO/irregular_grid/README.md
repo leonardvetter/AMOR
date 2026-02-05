@@ -39,10 +39,11 @@ The datasets are available from:
 ### Dataset Details
 
 **Elasticity Dataset**:
-- Input: Material property field (permeability) on irregular mesh
-- Output: Solution field (pressure/velocity) on the same mesh
+- Input: Mesh coordinates (X, Y) defining the geometry on irregular mesh
+- Output: Stress field (sigma) on the same mesh
 - Mesh: Irregular triangular mesh with varying node positions
 - Split: First 1000 samples for training, last 200 for testing (Geo-FNO standard)
+- Note: Material properties (rr) are available but not used as input; geometry defines material structure
 
 **Airfoil Dataset**:
 - Input: Flow field channels 0-3 (Q field) + X and Y coordinates

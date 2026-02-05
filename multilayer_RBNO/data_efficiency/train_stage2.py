@@ -18,7 +18,9 @@ import numpy as np
 
 from train_two_stage import (
     load_nonlinear_dataset, PCAReducerMultiChannel, MRBNOStage1,
-    train_stage2, evaluate_model
+    train_stage2, train_stage2_progressive_unfreeze, train_stage2_lr_warmup,
+    train_stage2_knowledge_distillation, initialize_lift_proj_from_pca,
+    evaluate_model
 )
 
 
@@ -27,18 +29,23 @@ def main():
     parser.add_argument('--data_path', type=str, default='$SCRATCH/data/nonlinear_diffusion_dataset_big.npz')
     parser.add_argument('--stage1_checkpoint', type=str, required=True)
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--epochs', type=int, default=300)
+    parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--lr', type=float, default=2e-3)
     parser.add_argument('--lr_blocks_factor', type=float, default=0.1,
                        help='LR multiplier for blocks (Version 2). Use 1.0 for Version 3.')
-    parser.add_argument('--version', type=int, choices=[1, 2, 3], default=1,
-                       help='Version: 1=frozen blocks, 2=different LR, 3=equal LR')
+    parser.add_argument('--version', type=int, choices=[1, 2, 3, 4, 5, 6, 7], default=1,
+                       help='Version: 1=frozen blocks, 2=different LR, 3=equal LR, 4=progressive unfreeze, 5=LR warmup, 6=knowledge distillation, 7=better init')
+    parser.add_argument('--stage1_ratio', type=float, default=0.9,
+                       help='Fraction of train/val data used for Stage 1 (must match Stage 1 training, default: 0.9)')
     parser.add_argument('--device', type=str, default='cuda')
     args = parser.parse_args()
     
     args.data_path = os.path.expandvars(args.data_path)
-    checkpoint_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'checkpoints')
+    scratch_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'data_efficiency')
+    checkpoint_dir = os.path.join(scratch_dir, 'checkpoints')
+    log_dir = os.path.join(scratch_dir, 'logs')
     os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
     
     if args.device == 'cuda' and not torch.cuda.is_available():
         print("CUDA not available, using CPU")
@@ -48,16 +55,16 @@ def main():
     
     print(f"Using device: {device}")
     
-    checkpoint = torch.load(args.stage1_checkpoint, map_location=device)
+    checkpoint = torch.load(args.stage1_checkpoint, map_location=device, weights_only=False)
     
     (X_train, Y_train, X_val, Y_val, X_test, Y_test), norm_stats = load_nonlinear_dataset(args.data_path)
     
     print("\n" + "="*70)
-    print("STAGE 2 DATA SPLIT: 10% of train/val for Stage 2")
+    print(f"STAGE 2 DATA SPLIT: {(1-args.stage1_ratio)*100:.0f}% of train/val for Stage 2")
     print("="*70)
     
     n_train_val = len(X_train) + len(X_val)
-    n_stage1 = int(0.9 * n_train_val)
+    n_stage1 = int(args.stage1_ratio * n_train_val)
     n_stage2 = n_train_val - n_stage1
     n_stage2_train = int(0.7 * n_stage2)
     
@@ -117,6 +124,10 @@ def main():
     
     stage2_base.load_state_dict(stage2_state, strict=False)
     
+    if args.version == 7:
+        initialize_lift_proj_from_pca(stage2_base, rb, k_in, k_out, width, device)
+        print("Version 7: Better initialization - initialized lift/proj from PCA")
+    
     if freeze_blocks:
         for param in stage2_base.block0.parameters():
             param.requires_grad = False
@@ -140,8 +151,16 @@ def main():
         print("Version 1: Only new weights trained (blocks frozen)")
     elif args.version == 2:
         print(f"Version 2: All weights trained, blocks LR = {args.lr * lr_blocks_factor:.2e} (factor {lr_blocks_factor})")
-    else:
+    elif args.version == 3:
         print("Version 3: All weights trained equally")
+    elif args.version == 4:
+        print("Version 4: Progressive unfreezing (blocks unfrozen at 25% of training)")
+    elif args.version == 5:
+        print("Version 5: LR warmup for new layers")
+    elif args.version == 6:
+        print("Version 6: Knowledge distillation from Stage 1")
+    elif args.version == 7:
+        print("Version 7: Better initialization (lift/proj initialized from PCA)")
     
     train_loader = DataLoader(
         TensorDataset(torch.from_numpy(X_stage2_train).float(),
@@ -159,8 +178,18 @@ def main():
         batch_size=args.batch_size, shuffle=False
     )
     
-    train_stage2(model, train_loader, val_loader, args.epochs, args.lr, lr_blocks_factor,
-                 device, checkpoint_dir, version_name)
+    if args.version == 4:
+        train_stage2_progressive_unfreeze(model, train_loader, val_loader, args.epochs, args.lr,
+                                          device, checkpoint_dir, version_name, start_epoch=0)
+    elif args.version == 5:
+        train_stage2_lr_warmup(model, train_loader, val_loader, args.epochs, args.lr,
+                              device, checkpoint_dir, version_name, start_epoch=0)
+    elif args.version == 6:
+        train_stage2_knowledge_distillation(model, stage1_model, train_loader, val_loader, args.epochs, args.lr,
+                                           device, checkpoint_dir, version_name, rb, k_in, k_out, start_epoch=0)
+    else:
+        train_stage2(model, train_loader, val_loader, args.epochs, args.lr, lr_blocks_factor,
+                     device, checkpoint_dir, version_name, start_epoch=0)
     
     print("\n" + "="*70)
     print("EVALUATING ON TEST SET")

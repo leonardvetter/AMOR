@@ -17,13 +17,19 @@ This directory contains code for two-stage training of MRBNO models on the nonli
 - Model: `MRBNOStage1` (removes parts operating on original spatial data)
 - Loss: Relative L1 loss in PCA space
 - Output: PCA coefficients
+- **PCA computation**: Uses ALL train/val data (including Stage 2 data) to ensure identical PCA basis with baseline
 
 **Stage 2**: Fine-tune complete MRBNO.py model on 10% of train/val data
 - Model: `MRBNOStage2` (complete MRBNO.py architecture)
-- Three versions:
+- **PCA reuse**: Uses PCA from Stage 1 checkpoint (computed on all train/val data)
+- Seven versions:
   - **Version 1**: Only new weights trained (blocks frozen)
   - **Version 2**: All weights trained, higher LR for new weights (blocks LR = 0.1 × base LR)
   - **Version 3**: All weights trained equally
+  - **Version 4**: Progressive unfreezing
+  - **Version 5**: LR warmup for new layers
+  - **Version 6**: Knowledge distillation
+  - **Version 7**: Better initialization for new layers
 - Loss: Relative L1 loss in real space
 
 ### 2. Baseline Training
@@ -32,13 +38,14 @@ Train MRBNO.py directly on full 20k samples (one-stage training)
 - Model: Complete MRBNO.py
 - Loss: Relative L1 loss
 - All samples used for training
+- **PCA computation**: Uses ALL train/val data (same as Stage 1) to ensure identical PCA basis for fair weight comparison
 
 ## Hyperparameters
 
 From `train_FNO_MRBNO_PCANet.ipynb`:
 - Batch size: 32
 - Learning rate: 2e-3
-- Epochs: 300 (with early stopping patience=50)
+- Epochs: 500 (with early stopping patience=50)
 - Width: 24
 - Layers: 4
 - Dropout: 0.0

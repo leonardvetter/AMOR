@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
 Stage 1 training: Train in PCA coefficient space on 90% of train/val data.
+PCA is computed on ALL train/val data (including Stage 2 data) to ensure
+identical PCA basis with baseline for fair weight comparison.
 """
 
 import sys
@@ -22,18 +24,32 @@ def main():
     parser = argparse.ArgumentParser(description='Stage 1 training')
     parser.add_argument('--data_path', type=str, default='$SCRATCH/data/nonlinear_diffusion_dataset_big.npz')
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--epochs', type=int, default=300)
+    parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--lr', type=float, default=2e-3)
     parser.add_argument('--width', type=int, default=24)
     parser.add_argument('--layers', type=int, default=4)
     parser.add_argument('--k_in', type=int, default=144)
     parser.add_argument('--k_out', type=int, default=144)
+    parser.add_argument('--j_in', type=float, default=0.99,
+                       help='PCA variance cutoff for input (default: 0.99)')
+    parser.add_argument('--j_out', type=float, default=0.99,
+                       help='PCA variance cutoff for output (default: 0.99)')
+    parser.add_argument('--stage1_ratio', type=float, default=0.9,
+                       help='Fraction of train/val data to use for Stage 1 (default: 0.9)')
+    parser.add_argument('--checkpoint_dir', type=str, default=None,
+                       help='Directory to save checkpoints (default: $SCRATCH/data_efficiency/checkpoints)')
+    parser.add_argument('--checkpoint_name', type=str, default='stage1_final.pt',
+                       help='Name for final checkpoint file (default: stage1_final.pt)')
     parser.add_argument('--device', type=str, default='cuda')
     args = parser.parse_args()
     
     args.data_path = os.path.expandvars(args.data_path)
+    if args.checkpoint_dir is not None:
+        checkpoint_dir = args.checkpoint_dir
+    else:
+        scratch_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'data_efficiency')
+        checkpoint_dir = os.path.join(scratch_dir, 'checkpoints')
     scratch_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'data_efficiency')
-    checkpoint_dir = os.path.join(scratch_dir, 'checkpoints')
     log_dir = os.path.join(scratch_dir, 'logs')
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
@@ -49,11 +65,11 @@ def main():
     (X_train, Y_train, X_val, Y_val, X_test, Y_test), norm_stats = load_nonlinear_dataset(args.data_path)
     
     print("\n" + "="*70)
-    print("STAGE 1 DATA SPLIT: 90% of train/val for Stage 1")
+    print(f"STAGE 1 DATA SPLIT: {args.stage1_ratio*100:.0f}% of train/val for Stage 1")
     print("="*70)
     
     n_train_val = len(X_train) + len(X_val)
-    n_stage1 = int(0.9 * n_train_val)
+    n_stage1 = int(args.stage1_ratio * n_train_val)
     n_stage1_train = int(0.7 * n_stage1)
     
     X_stage1_all = np.concatenate([X_train, X_val], axis=0)
@@ -69,12 +85,15 @@ def main():
     print(f"Stage 2 will use: {n_train_val - n_stage1} samples")
     
     print("\n" + "="*70)
-    print("COMPUTING PCA")
+    print("COMPUTING PCA ON ALL TRAIN/VAL DATA")
     print("="*70)
+    print("Note: PCA computed on all train/val data, but training uses only Stage 1 subset")
     
-    rb = PCAReducerMultiChannel().fit(X_stage1_train, Y_stage1_train)
+    X_all_train_val = np.concatenate([X_train, X_val], axis=0)
+    Y_all_train_val = np.concatenate([Y_train, Y_val], axis=0)
+    rb = PCAReducerMultiChannel().fit(X_all_train_val, Y_all_train_val)
     if args.k_in is None or args.k_out is None:
-        k_in, k_out = rb.k_from_cutoff(j_in=0.99, j_out=0.99)
+        k_in, k_out = rb.k_from_cutoff(j_in=args.j_in, j_out=args.j_out)
     else:
         k_in, k_out = args.k_in, args.k_out
     print(f"Using k_in={k_in}, k_out={k_out}")
@@ -113,7 +132,7 @@ def main():
     
     train_stage1(model, train_loader, val_loader, args.epochs, args.lr, device, checkpoint_dir, start_epoch=0)
     
-    checkpoint_path = os.path.join(checkpoint_dir, 'stage1_final.pt')
+    checkpoint_path = os.path.join(checkpoint_dir, args.checkpoint_name)
     import pickle
     rb_data = {
         'pca_in': rb.pca_in,

@@ -98,14 +98,11 @@ def main():
         "--dataset_path", elasticity_data_dir,
         "--dataset_type", "elasticity",
         "--n_modes", "144",
-        "--width", "32",
+        "--width", "24",
         "--n_layers", "4",
-        "--batch_size", "20",
-        "--epochs", "501",
-        "--lr", "0.001",
-        "--add_coords",
-        "--use_pos_encoding",
-        "--loss_type", "lp"
+        "--batch_size", "32",
+        "--epochs", "300",
+        "--lr", "2e-3"
     ]
     results['elasticity'] = run_command(cmd, "Elasticity Dataset Training", elasticity_log)
     
@@ -118,14 +115,11 @@ def main():
         "--dataset_path", airfoil_data_dir,
         "--dataset_type", "airfoil",
         "--n_modes", "144",
-        "--width", "32",
+        "--width", "24",
         "--n_layers", "4",
-        "--batch_size", "20",
-        "--epochs", "501",
-        "--lr", "0.001",
-        "--add_coords",
-        "--use_pos_encoding",
-        "--loss_type", "lp"
+        "--batch_size", "32",
+        "--epochs", "300",
+        "--lr", "2e-3"
     ]
     results['airfoil'] = run_command(cmd, "Airfoil Dataset Training", airfoil_log)
     
