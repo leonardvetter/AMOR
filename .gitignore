@@ -212,6 +212,10 @@ __marimo__/
 # Shell scripts
 *.sh
 
+# Text and checkpoint outputs
+*.txt
+*.pt
+
 # Vim swap files
 *.swp
 *.swo

@@ -59,6 +59,10 @@ def set_seed(seed):
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
+def l1_loss(pred, target):
+    """Absolute L1 loss for training."""
+    return torch.mean(torch.abs(pred - target))
+
 def relative_l1_loss(pred, target):
     return torch.mean(torch.abs(pred - target) / (torch.abs(target) + 1e-8))
 
@@ -90,7 +94,7 @@ def train_model(model, train_loader, val_loader, device, hyperparams):
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             pred = model(xb)
-            loss = relative_l1_loss(pred, yb)
+            loss = l1_loss(pred, yb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), hyperparams['max_grad_norm'])
             optimizer.step()
@@ -105,7 +109,7 @@ def train_model(model, train_loader, val_loader, device, hyperparams):
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
-                loss = relative_l1_loss(pred, yb)
+                loss = l1_loss(pred, yb)
                 val_loss += loss.item()
         val_loss /= len(val_loader)
         

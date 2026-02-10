@@ -115,8 +115,12 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+def l1_loss(pred, target):
+    """Absolute L1 loss for training."""
+    return torch.mean(torch.abs(pred - target))
+
 def relative_l1_loss(pred, target):
-    """Compute relative L1 loss: ||pred - target||_1 / ||target||_1"""
+    """Compute relative L1 loss: ||pred - target||_1 / ||target||_1 (for eval/logging)."""
     if pred.ndim == 4 and pred.shape[1] == 1:
         pred = pred.squeeze(1)
     if target.ndim == 4 and target.shape[1] == 1:
@@ -149,7 +153,7 @@ def train_model(model, train_loader, val_loader, device, hyperparams):
         T_max=hyperparams['epochs'], 
         eta_min=TRAINING_SCHEDULE['eta_min']
     )
-    criterion = relative_l1_loss
+    criterion = l1_loss
     
     train_losses = []
     val_losses = []

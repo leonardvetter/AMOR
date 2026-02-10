@@ -128,7 +128,7 @@ def train_model(model, train_loader, val_loader, epochs=300, lr=2e-3, weight_dec
         eps=1e-8
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=0.0)
-    criterion = nn.MSELoss()
+    criterion = nn.L1Loss()
     
     train_losses = []
     val_losses = []
@@ -312,12 +312,44 @@ def main():
         device=device,
         early_stopping_patience=args.early_stopping_patience
     )
-    
-    # Save checkpoint
+
+    # Compute rel_l1 and rel_l2 on train and val splits
+    def _rel_metrics(loader):
+        model.eval()
+        rel_l1_sum, rel_l2_sum, n = 0.0, 0.0, 0
+        with torch.no_grad():
+            for xb, yb in loader:
+                xb, yb = xb.to(device), yb.to(device)
+                pred = model(xb)
+                b = pred.size(0)
+                pred_flat = pred.view(b, -1)
+                y_flat = yb.view(b, -1)
+                diff_l1 = torch.abs(pred_flat - y_flat).sum(dim=1)
+                y_l1 = torch.abs(y_flat).sum(dim=1).clamp(min=1e-8)
+                rel_l1_sum += (diff_l1 / y_l1).sum().item()
+                diff_l2 = torch.norm(pred_flat - y_flat, p=2, dim=1)
+                y_l2 = torch.norm(y_flat, p=2, dim=1).clamp(min=1e-8)
+                rel_l2_sum += (diff_l2 / y_l2).sum().item()
+                n += b
+        return (rel_l1_sum / n if n else float('nan'), rel_l2_sum / n if n else float('nan'))
+    train_rel_l1, train_rel_l2 = _rel_metrics(train_loader)
+    val_rel_l1, val_rel_l2 = _rel_metrics(val_loader)
+    print(f"Train rel_l1: {train_rel_l1:.6f}, Train rel_l2: {train_rel_l2:.6f}")
+    print(f"Val rel_l1: {val_rel_l1:.6f}, Val rel_l2: {val_rel_l2:.6f}")
+
+    # Save checkpoint (includes model_state_dict and rel metrics on splits)
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     checkpoint_path = os.path.join(args.checkpoint_dir, 'mrbno_lift_v3_kolmogorov_Re5000_best.pt')
-    torch.save(model.state_dict(), checkpoint_path)
-    
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'train_rel_l1': train_rel_l1,
+        'train_rel_l2': train_rel_l2,
+        'val_rel_l1': val_rel_l1,
+        'val_rel_l2': val_rel_l2,
+        'best_val_loss': best_val_loss,
+        'best_epoch': best_epoch,
+    }, checkpoint_path)
+
     print("\n" + "="*70)
     print("TRAINING COMPLETE")
     print("="*70)

@@ -20,6 +20,8 @@ from train_two_stage import (
     load_nonlinear_dataset, PCAReducerMultiChannel, MRBNOStage1,
     train_stage2, train_stage2_progressive_unfreeze, train_stage2_lr_warmup,
     train_stage2_knowledge_distillation, initialize_lift_proj_from_pca,
+    train_stage2_lift_proj_high_lr, train_stage2_proj_high_lr,
+    train_stage2_lift_proj_first, train_stage2_phased_lift_proj,
     evaluate_model
 )
 
@@ -33,16 +35,25 @@ def main():
     parser.add_argument('--lr', type=float, default=2e-3)
     parser.add_argument('--lr_blocks_factor', type=float, default=0.1,
                        help='LR multiplier for blocks (Version 2). Use 1.0 for Version 3.')
-    parser.add_argument('--version', type=int, choices=[1, 2, 3, 4, 5, 6, 7], default=1,
-                       help='Version: 1=frozen blocks, 2=different LR, 3=equal LR, 4=progressive unfreeze, 5=LR warmup, 6=knowledge distillation, 7=better init')
+    parser.add_argument('--version', type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], default=1,
+                       help='1=frozen blocks, 8=lift/proj high LR, 11=proj only high LR, ...')
     parser.add_argument('--stage1_ratio', type=float, default=0.9,
                        help='Fraction of train/val data used for Stage 1 (must match Stage 1 training, default: 0.9)')
+    parser.add_argument('--lift_proj_lr_factor', type=float, default=5.0,
+                       help='LR multiplier for lift/proj in version 8 (default: 5.0)')
+    parser.add_argument('--proj_lr_factor', type=float, default=5.0,
+                       help='LR multiplier for proj only in version 11 (default: 5.0)')
+    parser.add_argument('--checkpoint_dir', type=str, default=None,
+                       help='Directory for Stage 2 checkpoints (default: $SCRATCH/data_efficiency/checkpoints)')
     parser.add_argument('--device', type=str, default='cuda')
     args = parser.parse_args()
     
     args.data_path = os.path.expandvars(args.data_path)
     scratch_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'data_efficiency')
-    checkpoint_dir = os.path.join(scratch_dir, 'checkpoints')
+    if args.checkpoint_dir is not None:
+        checkpoint_dir = os.path.expandvars(args.checkpoint_dir)
+    else:
+        checkpoint_dir = os.path.join(scratch_dir, 'checkpoints')
     log_dir = os.path.join(scratch_dir, 'logs')
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
@@ -104,7 +115,7 @@ def main():
     )
     stage1_model.load_state_dict(checkpoint['model_state_dict'])
     
-    freeze_blocks = (args.version == 1)
+    freeze_blocks = (args.version in [1, 8, 9, 10, 11])
     lr_blocks_factor = args.lr_blocks_factor if args.version == 2 else 1.0
     
     stage2_base = MRBNO(
@@ -117,32 +128,49 @@ def main():
     stage1_state = stage1_model.state_dict()
     stage2_state = stage2_base.state_dict()
     
+    copied_weights = []
     for name, param in stage1_state.items():
         if name in stage2_state:
             if name.startswith('block') or name.startswith('gate'):
-                stage2_state[name] = param
+                stage2_state[name] = param.clone()
+                copied_weights.append(name)
     
     stage2_base.load_state_dict(stage2_state, strict=False)
+    print(f"Copied {len(copied_weights)} PCA space weights from Stage 1 to Stage 2")
     
     if args.version == 7:
         initialize_lift_proj_from_pca(stage2_base, rb, k_in, k_out, width, device)
         print("Version 7: Better initialization - initialized lift/proj from PCA")
     
     if freeze_blocks:
+        frozen_params = []
         for param in stage2_base.block0.parameters():
             param.requires_grad = False
+            frozen_params.append(param)
         for param in stage2_base.block1.parameters():
             param.requires_grad = False
+            frozen_params.append(param)
         for block in stage2_base.blocks:
             for param in block.parameters():
                 param.requires_grad = False
+                frozen_params.append(param)
         for param in stage2_base.gate0.parameters():
             param.requires_grad = False
+            frozen_params.append(param)
         for param in stage2_base.gate1.parameters():
             param.requires_grad = False
+            frozen_params.append(param)
         for gate in stage2_base.gates:
             for param in gate.parameters():
                 param.requires_grad = False
+                frozen_params.append(param)
+        print(f"Frozen {len(frozen_params)} block/gate parameters (requires_grad=False)")
+        
+        trainable_params = [p for p in stage2_base.parameters() if p.requires_grad]
+        print(f"Trainable parameters: {len(trainable_params)}")
+        for name, param in stage2_base.named_parameters():
+            if param.requires_grad:
+                print(f"  - {name}")
     
     model = stage2_base
     
@@ -161,6 +189,14 @@ def main():
         print("Version 6: Knowledge distillation from Stage 1")
     elif args.version == 7:
         print("Version 7: Better initialization (lift/proj initialized from PCA)")
+    elif args.version == 8:
+        print(f"Version 8: Frozen blocks, higher LR for lift/proj ({args.lift_proj_lr_factor}x)")
+    elif args.version == 9:
+        print("Version 9: Frozen blocks, first train lift/proj/global_skip, then add skip_conv")
+    elif args.version == 10:
+        print("Version 10: Frozen blocks, phased: proj -> lift -> skip_conv -> global_skip")
+    elif args.version == 11:
+        print(f"Version 11: Frozen blocks, higher LR for proj only ({args.proj_lr_factor}x)")
     
     train_loader = DataLoader(
         TensorDataset(torch.from_numpy(X_stage2_train).float(),
@@ -181,6 +217,20 @@ def main():
     if args.version == 4:
         train_stage2_progressive_unfreeze(model, train_loader, val_loader, args.epochs, args.lr,
                                           device, checkpoint_dir, version_name, start_epoch=0)
+    elif args.version == 8:
+        train_stage2_lift_proj_high_lr(model, train_loader, val_loader, args.epochs, args.lr,
+                                       device, checkpoint_dir, version_name, start_epoch=0,
+                                       lift_proj_lr_factor=args.lift_proj_lr_factor)
+    elif args.version == 11:
+        train_stage2_proj_high_lr(model, train_loader, val_loader, args.epochs, args.lr,
+                                  device, checkpoint_dir, version_name, start_epoch=0,
+                                  proj_lr_factor=args.proj_lr_factor)
+    elif args.version == 9:
+        train_stage2_lift_proj_first(model, train_loader, val_loader, args.epochs, args.lr,
+                                     device, checkpoint_dir, version_name, start_epoch=0)
+    elif args.version == 10:
+        train_stage2_phased_lift_proj(model, train_loader, val_loader, args.epochs, args.lr,
+                                      device, checkpoint_dir, version_name, start_epoch=0)
     elif args.version == 5:
         train_stage2_lr_warmup(model, train_loader, val_loader, args.epochs, args.lr,
                               device, checkpoint_dir, version_name, start_epoch=0)
@@ -198,6 +248,31 @@ def main():
     test_rel_l1, test_rel_l2 = evaluate_model(model, test_loader, device, is_stage1=False)
     print(f"Test relative L1 error: {test_rel_l1:.4e}")
     print(f"Test relative L2 error: {test_rel_l2:.4e}")
+    
+    if freeze_blocks:
+        print("\n" + "="*70)
+        print(f"VERIFYING FROZEN BLOCKS: Stage 1 vs Stage 2 {version_name} PCA Weights")
+        print("="*70)
+        from analyze_weight_similarity import extract_pca_weights, compare_weights
+        stage1_pca = extract_pca_weights(stage1_model)
+        stage2_pca = extract_pca_weights(model)
+        
+        all_identical = True
+        max_diff = 0.0
+        for key in stage1_pca.keys():
+            if key in stage2_pca:
+                w1 = stage1_pca[key].cpu()
+                w2 = stage2_pca[key].cpu()
+                diff = torch.norm(w1 - w2).item()
+                max_diff = max(max_diff, diff)
+                if diff > 1e-6:
+                    print(f"WARNING: {key} differs by {diff:.2e}")
+                    all_identical = False
+        
+        if all_identical:
+            print(f"✓ All PCA space weights are IDENTICAL (max diff: {max_diff:.2e})")
+        else:
+            print(f"✗ Some PCA space weights differ (max diff: {max_diff:.2e})")
 
 
 if __name__ == '__main__':

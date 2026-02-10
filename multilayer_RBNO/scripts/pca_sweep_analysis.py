@@ -71,8 +71,12 @@ DATASETS = {
     '2D_NS_Re5000.npy': 'kolmogorov',
 }
 
+def l1_loss(pred, target):
+    """Absolute L1 loss for training."""
+    return torch.mean(torch.abs(pred - target))
+
 def relative_l1_loss(pred, target):
-    """Compute relative L1 loss."""
+    """Compute relative L1 loss (for eval/logging)."""
     return torch.mean(torch.abs(pred - target) / (torch.abs(target) + 1e-8))
 
 def load_dataset(dataset_path, dataset_type, num_samples=1000):
@@ -142,7 +146,7 @@ def train_model(model, train_loader, val_loader, device, hyperparameters, traini
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             pred = model(xb)
-            loss = relative_l1_loss(pred, yb)
+            loss = l1_loss(pred, yb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), hyperparameters['max_grad_norm'])
             optimizer.step()
@@ -154,7 +158,7 @@ def train_model(model, train_loader, val_loader, device, hyperparameters, traini
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
-                loss = relative_l1_loss(pred, yb)
+                loss = l1_loss(pred, yb)
                 val_loss += loss.item() * xb.size(0)
         
         train_loss /= len(train_loader.dataset)
@@ -179,7 +183,7 @@ def evaluate_model(model, loader, device):
         for xb, yb in loader:
             xb, yb = xb.to(device), yb.to(device)
             pred = model(xb)
-            loss = relative_l1_loss(pred, yb)
+            loss = l1_loss(pred, yb)
             total_loss += loss.item()
     return total_loss / len(loader)
 

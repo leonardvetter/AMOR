@@ -16,12 +16,19 @@ import sys
 import argparse
 
 # Import from local directory first (for MRBNO and PCAReducer with 3D support)
-sys.path.insert(0, os.path.dirname(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'models'))
+local_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, local_dir)
+# Don't import from models directory - use local PCAReducer that handles 3D
 
 from geofno_loader import prepare_geofno_data
 from MRBNO import MRBNO
-from PCAReducer import PCAReducerMultiChannel
+# Import local PCAReducer (handles 3D data)
+import importlib.util
+pca_path = os.path.join(local_dir, 'PCAReducer.py')
+spec = importlib.util.spec_from_file_location("PCAReducer", pca_path)
+PCAReducer_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(PCAReducer_module)
+PCAReducerMultiChannel = PCAReducer_module.PCAReducerMultiChannel
 
 
 
@@ -63,7 +70,8 @@ def load_model(checkpoint_path, dataset_type, device):
     k_in = checkpoint.get('k_in', args.get('n_modes', 144))
     k_out = checkpoint.get('k_out', args.get('n_modes', 144))
     
-    # Create model
+    # Create model - use exact args from checkpoint
+    use_coords = args.get('add_coords', args.get('use_coordinates', False))
     model = MRBNO(
         width=args['width'],
         rb=rb,
@@ -74,7 +82,7 @@ def load_model(checkpoint_path, dataset_type, device):
         init_scale=0.1,
         use_skip_connections=True,
         use_batch_norm=True,
-        use_coordinates=args.get('add_coords', True),
+        use_coordinates=use_coords,
         add_constant_mode=False,
         use_factorized_weights=False
     ).to(device)
@@ -85,190 +93,152 @@ def load_model(checkpoint_path, dataset_type, device):
     return model, test_dataset, mesh_coords, material_props
 
 
+def _plot_four_panel_scatter(xy, pred_1d, true_1d, abs_error_1d, rel_error_1d, title_prefix, sample_idx, save_path=None,
+                             mesh_title='Mesh / point cloud', pred_title='MRBNO prediction', gt_title='Ground truth', error_title='Absolute error'):
+    """Generic 4-panel plot: mesh, ground truth, prediction, error. xy shape (N, 2)."""
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    vmin = min(pred_1d.min(), true_1d.min())
+    vmax = max(pred_1d.max(), true_1d.max())
+    cmap = 'RdBu_r'
+
+    ax = axes[0, 0]
+    ax.scatter(xy[:, 0], xy[:, 1], c='steelblue', s=8, alpha=0.7, edgecolors='none')
+    ax.set_title(f'{mesh_title}\nSample {sample_idx}')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[0, 1]
+    sc = ax.scatter(xy[:, 0], xy[:, 1], c=pred_1d, cmap=cmap, s=15, vmin=vmin, vmax=vmax)
+    ax.set_title(f'{pred_title}\nSample {sample_idx}')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_aspect('equal')
+    plt.colorbar(sc, ax=ax)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 0]
+    sc = ax.scatter(xy[:, 0], xy[:, 1], c=true_1d, cmap=cmap, s=15, vmin=vmin, vmax=vmax)
+    ax.set_title(f'{gt_title}\nSample {sample_idx}')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_aspect('equal')
+    plt.colorbar(sc, ax=ax)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 1]
+    sc = ax.scatter(xy[:, 0], xy[:, 1], c=abs_error_1d, cmap='hot', s=15)
+    ax.set_title(f'{error_title}\nSample {sample_idx}')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_aspect('equal')
+    plt.colorbar(sc, ax=ax, label='|pred − truth|')
+    ax.grid(True, alpha=0.3)
+
+    plt.suptitle(title_prefix, fontsize=12, y=1.02)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Saved plot to {save_path}")
+    plt.close()
+
+
 def plot_elasticity_prediction(model, test_dataset, mesh_coords, material_props, sample_idx, device, save_path=None):
-    """Plot elasticity prediction for one sample."""
+    """Plot elasticity: mesh, ground truth (stress σ), prediction, error."""
     sample_data = test_dataset.data[sample_idx:sample_idx+1].to(device)
     sample_target = test_dataset.targets[sample_idx:sample_idx+1].to(device)
-    
     with torch.no_grad():
         prediction = model(sample_data)
-    
-    input_xy = sample_data[0].cpu().numpy().T
     pred_sigma = prediction[0, 0].cpu().numpy()
     true_sigma = sample_target[0, 0].cpu().numpy()
-    error = pred_sigma - true_sigma
-    abs_error = np.abs(error)
+    abs_error = np.abs(pred_sigma - true_sigma)
     rel_error = abs_error / (np.abs(true_sigma) + 1e-8)
-    
-    xy = mesh_coords
-    
-    fig, axes = plt.subplots(2, 2, figsize=(16, 16))
-    
-    # Input: mesh coordinates (X, Y)
-    ax = axes[0, 0]
-    scatter = ax.scatter(xy[:, 0], xy[:, 1], c='blue', s=10, alpha=0.6, edgecolors='k', linewidths=0.1)
-    ax.set_title(f'Input: Mesh Coordinates (X, Y)\nSample {sample_idx}')
-    ax.set_xlabel('X coordinate')
-    ax.set_ylabel('Y coordinate')
-    ax.set_aspect('equal')
-    ax.grid(True, alpha=0.3)
-    
-    # Use same colormap and scale for prediction and ground truth
-    vmin = min(pred_sigma.min(), true_sigma.min())
-    vmax = max(pred_sigma.max(), true_sigma.max())
-    cmap = 'RdBu_r'
-    
-    # Prediction
-    ax = axes[0, 1]
-    scatter = ax.scatter(xy[:, 0], xy[:, 1], c=pred_sigma, cmap=cmap, s=50, vmin=vmin, vmax=vmax, edgecolors='k', linewidths=0.2)
-    ax.set_title(f'Prediction: Stress Field (σ)\nSample {sample_idx}')
-    ax.set_xlabel('X coordinate')
-    ax.set_ylabel('Y coordinate')
-    ax.set_aspect('equal')
-    plt.colorbar(scatter, ax=ax, label='Predicted stress')
-    ax.grid(True, alpha=0.3)
-    
-    # Ground truth
-    ax = axes[1, 0]
-    scatter = ax.scatter(xy[:, 0], xy[:, 1], c=true_sigma, cmap=cmap, s=50, vmin=vmin, vmax=vmax, edgecolors='k', linewidths=0.2)
-    ax.set_title(f'Ground Truth: Stress Field (σ)\nSample {sample_idx}')
-    ax.set_xlabel('X coordinate')
-    ax.set_ylabel('Y coordinate')
-    ax.set_aspect('equal')
-    plt.colorbar(scatter, ax=ax, label='True stress')
-    ax.grid(True, alpha=0.3)
-    
-    # Relative error
-    ax = axes[1, 1]
-    scatter = ax.scatter(xy[:, 0], xy[:, 1], c=rel_error, cmap='hot', s=50, edgecolors='k', linewidths=0.2)
-    ax.set_title(f'Relative Error: |Prediction - Ground Truth| / |Ground Truth|\nSample {sample_idx}')
-    ax.set_xlabel('X coordinate')
-    ax.set_ylabel('Y coordinate')
-    ax.set_aspect('equal')
-    plt.colorbar(scatter, ax=ax, label='Relative error')
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Saved elasticity prediction plot to {save_path}")
-    else:
-        plt.show()
-    
-    plt.close()
-    
-    print(f"\nElasticity Sample {sample_idx} Statistics:")
-    print(f"  Prediction range: [{pred_sigma.min():.6f}, {pred_sigma.max():.6f}]")
-    print(f"  Ground truth range: [{true_sigma.min():.6f}, {true_sigma.max():.6f}]")
-    print(f"  Mean absolute error: {abs_error.mean():.6f}")
-    print(f"  Max absolute error: {abs_error.max():.6f}")
-    print(f"  Mean relative error: {rel_error.mean():.6f}")
-    print(f"  Max relative error: {rel_error.max():.6f}")
+    xy = np.asarray(mesh_coords)
+    if xy.shape[1] > 2:
+        xy = xy[:, :2]
+    _plot_four_panel_scatter(
+        xy, pred_sigma, true_sigma, abs_error, rel_error,
+        'Elasticity: stress field (σ)', sample_idx, save_path,
+        mesh_title='Mesh (X, Y)', pred_title='Prediction (σ)', gt_title='Ground truth (σ)', error_title='Error |pred − truth|'
+    )
+    print(f"Elasticity sample {sample_idx}: pred range [{pred_sigma.min():.4f}, {pred_sigma.max():.4f}], mean abs err {abs_error.mean():.4f}, mean rel err {rel_error.mean():.4f}")
 
 
-def plot_airfoil_prediction(model, test_dataset, mesh_coords, sample_idx, device, save_path=None):
-    """Plot airfoil prediction for one sample."""
+def plot_airfoil_prediction(model, test_dataset, mesh_coords, sample_idx, device, save_path=None, title_prefix='Airfoil: Q field'):
+    """Plot airfoil (or pipe/channel-shocks): mesh, ground truth Q, prediction, error."""
     sample_data = test_dataset.data[sample_idx:sample_idx+1].to(device)
     sample_target = test_dataset.targets[sample_idx:sample_idx+1].to(device)
-    
     with torch.no_grad():
         prediction = model(sample_data)
-    
     pred_q = prediction[0, 0].cpu().numpy()
     true_q = sample_target[0, 0].cpu().numpy()
-    error = pred_q - true_q
-    abs_error = np.abs(error)
+    abs_error = np.abs(pred_q - true_q)
     rel_error = abs_error / (np.abs(true_q) + 1e-8)
-    
-    xy = mesh_coords
-    
-    original_height, original_width = 221, 51
-    pred_q_2d = pred_q.reshape(original_height, original_width)
-    true_q_2d = true_q.reshape(original_height, original_width)
-    rel_error_2d = rel_error.reshape(original_height, original_width)
-    xy_2d = xy.reshape(original_height, original_width, 2)
-    
-    fig, axes = plt.subplots(2, 2, figsize=(16, 16))
-    
-    # Use same colormap and scale for prediction and ground truth
-    vmin = min(pred_q_2d.min(), true_q_2d.min())
-    vmax = max(pred_q_2d.max(), true_q_2d.max())
-    
-    # For better visualization, focus colormap on the range where most data falls
-    # Use percentiles to avoid extreme outliers dominating the colormap
-    p5_pred, p95_pred = np.percentile(pred_q_2d, [5, 95])
-    p5_true, p95_true = np.percentile(true_q_2d, [5, 95])
-    vmin_focused = min(p5_pred, p5_true)
-    vmax_focused = max(p95_pred, p95_true)
-    
-    cmap = 'RdBu_r'
-    n_levels = 50
-    
-    # Input: mesh coordinates - show as scatter to see grid points
-    ax = axes[0, 0]
-    scatter = ax.scatter(xy[:, 0], xy[:, 1], c='blue', s=2, alpha=0.6)
-    ax.set_title(f'Input: Mesh Coordinates (X, Y)\nSample {sample_idx} - {len(xy)} grid points')
-    ax.set_xlabel('X coordinate')
-    ax.set_ylabel('Y coordinate')
-    ax.set_aspect('equal')
-    ax.grid(True, alpha=0.3)
-    
-    # Prediction - use focused colormap range for better detail
-    ax = axes[0, 1]
-    im = ax.contourf(xy_2d[:, :, 0], xy_2d[:, :, 1], pred_q_2d, levels=n_levels, cmap=cmap, vmin=vmin_focused, vmax=vmax_focused, extend='both')
-    ax.contour(xy_2d[:, :, 0], xy_2d[:, :, 1], pred_q_2d, levels=20, colors='k', alpha=0.2, linewidths=0.5)
-    ax.set_title(f'Prediction: Q Field\nSample {sample_idx}')
-    ax.set_xlabel('X coordinate')
-    ax.set_ylabel('Y coordinate')
-    ax.set_aspect('equal')
-    plt.colorbar(im, ax=ax, label='Predicted Q field')
-    ax.grid(True, alpha=0.3)
-    
-    # Ground truth - use same focused colormap range
-    ax = axes[1, 0]
-    im = ax.contourf(xy_2d[:, :, 0], xy_2d[:, :, 1], true_q_2d, levels=n_levels, cmap=cmap, vmin=vmin_focused, vmax=vmax_focused, extend='both')
-    ax.contour(xy_2d[:, :, 0], xy_2d[:, :, 1], true_q_2d, levels=20, colors='k', alpha=0.2, linewidths=0.5)
-    ax.set_title(f'Ground Truth: Q Field\nSample {sample_idx}')
-    ax.set_xlabel('X coordinate')
-    ax.set_ylabel('Y coordinate')
-    ax.set_aspect('equal')
-    plt.colorbar(im, ax=ax, label='True Q field')
-    ax.grid(True, alpha=0.3)
-    
-    # Relative error
-    ax = axes[1, 1]
-    im = ax.contourf(xy_2d[:, :, 0], xy_2d[:, :, 1], rel_error_2d, levels=50, cmap='hot')
-    ax.set_title(f'Relative Error: |Prediction - Ground Truth| / |Ground Truth|\nSample {sample_idx}')
-    ax.set_xlabel('X coordinate')
-    ax.set_ylabel('Y coordinate')
-    ax.set_aspect('equal')
-    plt.colorbar(im, ax=ax, label='Relative error')
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Saved airfoil prediction plot to {save_path}")
+    xy = np.asarray(mesh_coords)
+    if xy.shape[1] > 2:
+        xy = xy[:, :2]
+    _plot_four_panel_scatter(
+        xy, pred_q, true_q, abs_error, rel_error,
+        title_prefix, sample_idx, save_path,
+        mesh_title='Mesh (X, Y)', pred_title='Prediction (Q)', gt_title='Ground truth (Q)', error_title='Error |pred − truth|'
+    )
+    print(f"Sample {sample_idx}: pred range [{pred_q.min():.4f}, {pred_q.max():.4f}], mean abs err {abs_error.mean():.4f}")
+
+
+def plot_plasticity_prediction(model, test_dataset, mesh_coords, sample_idx, device, save_path=None):
+    """Plasticity: output (2480, num_nodes). Plot first output channel; mesh is placeholder so use node-index layout."""
+    sample_data = test_dataset.data[sample_idx:sample_idx+1].to(device)
+    sample_target = test_dataset.targets[sample_idx:sample_idx+1].to(device)
+    with torch.no_grad():
+        prediction = model(sample_data)
+    # Use first channel (one time/spatial slice) for visualization
+    pred_1d = prediction[0, 0].cpu().numpy()   # (num_nodes,)
+    true_1d = sample_target[0, 0].cpu().numpy()
+    abs_error = np.abs(pred_1d - true_1d)
+    rel_error = abs_error / (np.abs(true_1d) + 1e-8)
+    num_nodes = pred_1d.size
+    # No real mesh: use 2D layout by node index (e.g. 10x11 for 101 nodes)
+    n2 = int(np.ceil(np.sqrt(num_nodes)))
+    n1 = (num_nodes + n2 - 1) // n2
+    node_x = np.arange(num_nodes) % n1
+    node_y = np.arange(num_nodes) // n1
+    xy = np.stack([node_x, node_y], axis=1).astype(np.float64)
+    _plot_four_panel_scatter(
+        xy, pred_1d, true_1d, abs_error, rel_error,
+        'Plasticity: first output channel (node layout)', sample_idx, save_path,
+        mesh_title='Node layout (index)', pred_title='Prediction', gt_title='Ground truth', error_title='Error |pred − truth|'
+    )
+    print(f"Plasticity sample {sample_idx}: pred range [{pred_1d.min():.4f}, {pred_1d.max():.4f}], mean abs err {abs_error.mean():.4f}")
+
+
+def plot_car_cfd_prediction(model, test_dataset, mesh_coords, sample_idx, device, save_path=None):
+    """Car-CFD: 3D mesh, pressure output. Use 2D projection (X, Y) for visualization."""
+    sample_data = test_dataset.data[sample_idx:sample_idx+1].to(device)
+    sample_target = test_dataset.targets[sample_idx:sample_idx+1].to(device)
+    with torch.no_grad():
+        prediction = model(sample_data)
+    pred_1d = prediction[0, 0].cpu().numpy()
+    true_1d = sample_target[0, 0].cpu().numpy()
+    abs_error = np.abs(pred_1d - true_1d)
+    rel_error = abs_error / (np.abs(true_1d) + 1e-8)
+    xy = np.asarray(mesh_coords)
+    if xy.shape[1] >= 2:
+        xy = xy[:, :2]
     else:
-        plt.show()
-    
-    plt.close()
-    
-    print(f"\nAirfoil Sample {sample_idx} Statistics:")
-    print(f"  Prediction range: [{pred_q.min():.6f}, {pred_q.max():.6f}]")
-    print(f"  Ground truth range: [{true_q.min():.6f}, {true_q.max():.6f}]")
-    print(f"  Mean absolute error: {abs_error.mean():.6f}")
-    print(f"  Max absolute error: {abs_error.max():.6f}")
-    print(f"  Mean relative error: {rel_error.mean():.6f}")
-    print(f"  Max relative error: {rel_error.max():.6f}")
+        xy = np.stack([np.arange(len(pred_1d)), np.zeros(len(pred_1d))], axis=1)
+    _plot_four_panel_scatter(
+        xy, pred_1d, true_1d, abs_error, rel_error,
+        'Car-CFD: pressure (X–Y projection)', sample_idx, save_path,
+        mesh_title='Point cloud (X, Y)', pred_title='Prediction (pressure)', gt_title='Ground truth (pressure)', error_title='Error |pred − truth|'
+    )
+    print(f"Car-CFD sample {sample_idx}: pred range [{pred_1d.min():.4f}, {pred_1d.max():.4f}], mean abs err {abs_error.mean():.4f}")
 
 
 def main():
     parser = argparse.ArgumentParser(description='Plot MRBNO predictions')
     parser.add_argument('--dataset_type', type=str, required=True,
-                       choices=['elasticity', 'airfoil'],
+                       choices=['elasticity', 'airfoil', 'pipe', 'plasticity', 'car-cfd', 'channel-shocks'],
                        help='Dataset type')
     parser.add_argument('--checkpoint_path', type=str, required=True,
                        help='Path to model checkpoint')
@@ -276,8 +246,8 @@ def main():
                        help='Sample index to plot (default: 42)')
     parser.add_argument('--output_dir', type=str, default=None,
                        help='Output directory for plots (default: $SCRATCH/data/geofno_predictions)')
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
-                       help='Device to use')
+    parser.add_argument('--device', type=str, default='cpu',
+                       help='Device to use (default: cpu to avoid OOM)')
     
     args = parser.parse_args()
     
@@ -307,12 +277,22 @@ def main():
     
     if args.dataset_type == 'elasticity':
         save_path = os.path.join(args.output_dir, f'elasticity_prediction_sample_{args.sample_idx}.png')
-        plot_elasticity_prediction(model, test_dataset, mesh_coords, material_props, 
-                                  args.sample_idx, device, save_path)
+        plot_elasticity_prediction(model, test_dataset, mesh_coords, material_props, args.sample_idx, device, save_path)
     elif args.dataset_type == 'airfoil':
         save_path = os.path.join(args.output_dir, f'airfoil_prediction_sample_{args.sample_idx}.png')
-        plot_airfoil_prediction(model, test_dataset, mesh_coords, args.sample_idx, device, save_path)
-    
+        plot_airfoil_prediction(model, test_dataset, mesh_coords, args.sample_idx, device, save_path, title_prefix='Airfoil: Q field')
+    elif args.dataset_type == 'pipe':
+        save_path = os.path.join(args.output_dir, f'pipe_prediction_sample_{args.sample_idx}.png')
+        plot_airfoil_prediction(model, test_dataset, mesh_coords, args.sample_idx, device, save_path, title_prefix='Pipe: Q field')
+    elif args.dataset_type == 'channel-shocks':
+        save_path = os.path.join(args.output_dir, f'channel_shocks_prediction_sample_{args.sample_idx}.png')
+        plot_airfoil_prediction(model, test_dataset, mesh_coords, args.sample_idx, device, save_path, title_prefix='Channel-shocks: Q field')
+    elif args.dataset_type == 'plasticity':
+        save_path = os.path.join(args.output_dir, f'plasticity_prediction_sample_{args.sample_idx}.png')
+        plot_plasticity_prediction(model, test_dataset, mesh_coords, args.sample_idx, device, save_path)
+    elif args.dataset_type == 'car-cfd':
+        save_path = os.path.join(args.output_dir, f'car_cfd_prediction_sample_{args.sample_idx}.png')
+        plot_car_cfd_prediction(model, test_dataset, mesh_coords, args.sample_idx, device, save_path)
     print(f"\nPlot saved to: {save_path}")
 
 

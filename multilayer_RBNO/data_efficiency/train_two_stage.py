@@ -25,8 +25,13 @@ from sklearn.decomposition import PCA
 from MRBNO import MRBNO, ReducedBasisBlock, ScalarGate
 
 
+def l1_loss(pred, target):
+    """Absolute L1 loss (mean over batch). Used as training/validation metric for early stopping."""
+    return torch.mean(torch.abs(pred - target))
+
+
 def relative_l1_loss(pred, target, eps=1e-8):
-    """Compute relative L1 loss: ||pred - target||_1 / ||target||_1"""
+    """Compute relative L1 loss: ||pred - target||_1 / ||target||_1. For logging/eval only."""
     pred_flat = pred.view(pred.size(0), -1)
     target_flat = target.view(target.size(0), -1)
     diff = torch.abs(pred_flat - target_flat)
@@ -311,38 +316,43 @@ def train_stage1(model, train_loader, val_loader, epochs, lr, device, checkpoint
     
     for epoch in range(start_epoch, epochs):
         model.train()
-        train_loss = 0.0
+        train_l1 = 0.0
+        train_rel_l1 = 0.0
         train_rel_l2 = 0.0
         for xb_pca, yb_pca in train_loader:
             xb_pca, yb_pca = xb_pca.to(device), yb_pca.to(device)
             optimizer.zero_grad()
             pred_pca = model(xb_pca)
-            loss = relative_l1_loss(pred_pca, yb_pca)
+            loss = l1_loss(pred_pca, yb_pca)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
             optimizer.step()
-            train_loss += loss.item() * xb_pca.size(0)
+            train_l1 += loss.item() * xb_pca.size(0)
+            train_rel_l1 += relative_l1_loss(pred_pca, yb_pca).item() * xb_pca.size(0)
             train_rel_l2 += relative_l2_error(pred_pca, yb_pca) * xb_pca.size(0)
-        train_loss /= len(train_loader.dataset)
+        train_l1 /= len(train_loader.dataset)
+        train_rel_l1 /= len(train_loader.dataset)
         train_rel_l2 /= len(train_loader.dataset)
         
         model.eval()
-        val_loss = 0.0
+        val_l1 = 0.0
+        val_rel_l1 = 0.0
         val_rel_l2 = 0.0
         with torch.no_grad():
             for xb_pca, yb_pca in val_loader:
                 xb_pca, yb_pca = xb_pca.to(device), yb_pca.to(device)
                 pred_pca = model(xb_pca)
-                loss = relative_l1_loss(pred_pca, yb_pca)
-                val_loss += loss.item() * xb_pca.size(0)
+                val_l1 += l1_loss(pred_pca, yb_pca).item() * xb_pca.size(0)
+                val_rel_l1 += relative_l1_loss(pred_pca, yb_pca).item() * xb_pca.size(0)
                 val_rel_l2 += relative_l2_error(pred_pca, yb_pca) * xb_pca.size(0)
-        val_loss /= len(val_loader.dataset)
+        val_l1 /= len(val_loader.dataset)
+        val_rel_l1 /= len(val_loader.dataset)
         val_rel_l2 /= len(val_loader.dataset)
         
         scheduler.step()
         
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_l1 < best_val_loss:
+            best_val_loss = val_l1
             best_epoch = epoch
             patience_counter = 0
             checkpoint_path = os.path.join(checkpoint_dir, 'stage1_best.pt')
@@ -351,7 +361,7 @@ def train_stage1(model, train_loader, val_loader, epochs, lr, device, checkpoint
             patience_counter += 1
         
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"[Stage 1 Epoch {epoch+1:03d}/{epochs}] train_rel_l1={train_loss:.4e} train_rel_l2={train_rel_l2:.4e} val_rel_l1={val_loss:.4e} val_rel_l2={val_rel_l2:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
+            print(f"[Stage 1 Epoch {epoch+1:03d}/{epochs}] train_l1={train_l1:.4e} train_rel_l1={train_rel_l1:.4e} train_rel_l2={train_rel_l2:.4e} val_l1={val_l1:.4e} val_rel_l1={val_rel_l1:.4e} val_rel_l2={val_rel_l2:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
         
         if (epoch + 1) % 10 == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f'stage1_epoch_{epoch+1}.pt')
@@ -362,7 +372,9 @@ def train_stage1(model, train_loader, val_loader, epochs, lr, device, checkpoint
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
-                'best_epoch': best_epoch
+                'best_epoch': best_epoch,
+                'val_rel_l1': val_rel_l1,
+                'val_rel_l2': val_rel_l2,
             }
             torch.save(checkpoint_data, checkpoint_path)
             torch.save(checkpoint_data, resume_path)
@@ -422,38 +434,43 @@ def train_stage2(model, train_loader, val_loader, epochs, lr, lr_blocks_factor, 
     
     for epoch in range(start_epoch, epochs):
         model.train()
-        train_loss = 0.0
+        train_l1 = 0.0
+        train_rel_l1 = 0.0
         train_rel_l2 = 0.0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             pred = model(xb)
-            loss = relative_l1_loss(pred, yb)
+            loss = l1_loss(pred, yb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
             optimizer.step()
-            train_loss += loss.item() * xb.size(0)
+            train_l1 += loss.item() * xb.size(0)
+            train_rel_l1 += relative_l1_loss(pred, yb).item() * xb.size(0)
             train_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
-        train_loss /= len(train_loader.dataset)
+        train_l1 /= len(train_loader.dataset)
+        train_rel_l1 /= len(train_loader.dataset)
         train_rel_l2 /= len(train_loader.dataset)
         
         model.eval()
-        val_loss = 0.0
+        val_l1 = 0.0
+        val_rel_l1 = 0.0
         val_rel_l2 = 0.0
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
-                loss = relative_l1_loss(pred, yb)
-                val_loss += loss.item() * xb.size(0)
+                val_l1 += l1_loss(pred, yb).item() * xb.size(0)
+                val_rel_l1 += relative_l1_loss(pred, yb).item() * xb.size(0)
                 val_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
-        val_loss /= len(val_loader.dataset)
+        val_l1 /= len(val_loader.dataset)
+        val_rel_l1 /= len(val_loader.dataset)
         val_rel_l2 /= len(val_loader.dataset)
         
         scheduler.step()
         
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_l1 < best_val_loss:
+            best_val_loss = val_l1
             best_epoch = epoch
             patience_counter = 0
             checkpoint_path = os.path.join(checkpoint_dir, f'stage2_{version_name}_best.pt')
@@ -462,7 +479,7 @@ def train_stage2(model, train_loader, val_loader, epochs, lr, lr_blocks_factor, 
             patience_counter += 1
         
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"[Stage 2 {version_name} Epoch {epoch+1:03d}/{epochs}] train_rel_l1={train_loss:.4e} train_rel_l2={train_rel_l2:.4e} val_rel_l1={val_loss:.4e} val_rel_l2={val_rel_l2:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
+            print(f"[Stage 2 {version_name} Epoch {epoch+1:03d}/{epochs}] train_l1={train_l1:.4e} train_rel_l1={train_rel_l1:.4e} train_rel_l2={train_rel_l2:.4e} val_l1={val_l1:.4e} val_rel_l1={val_rel_l1:.4e} val_rel_l2={val_rel_l2:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
         
         if (epoch + 1) % 10 == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f'stage2_{version_name}_epoch_{epoch+1}.pt')
@@ -473,6 +490,8 @@ def train_stage2(model, train_loader, val_loader, epochs, lr, lr_blocks_factor, 
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
+                'val_rel_l1': val_rel_l1,
+                'val_rel_l2': val_rel_l2,
                 'best_epoch': best_epoch
             }
             torch.save(checkpoint_data, checkpoint_path)
@@ -483,6 +502,302 @@ def train_stage2(model, train_loader, val_loader, epochs, lr, lr_blocks_factor, 
             break
     
     return best_val_loss
+
+
+def train_stage2_proj_high_lr(model, train_loader, val_loader, epochs, lr, device, checkpoint_dir, version_name, start_epoch=0, proj_lr_factor=5.0):
+    """Train Stage 2 with frozen blocks. Higher LR for projection layers only (proj1, proj2)."""
+    model.to(device)
+    proj_params = []
+    other_params = []
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if 'proj' in name:
+                proj_params.append(param)
+            else:
+                other_params.append(param)
+    param_groups = [
+        {'params': proj_params, 'lr': lr * proj_lr_factor},
+        {'params': other_params, 'lr': lr}
+    ]
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=1e-4,
+                                   betas=(0.9, 0.999), eps=1e-8)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=0.0)
+    return _train_stage2_loop(model, train_loader, val_loader, epochs, optimizer, scheduler,
+                              device, checkpoint_dir, version_name, start_epoch)
+
+
+def train_stage2_lift_proj_high_lr(model, train_loader, val_loader, epochs, lr, device, checkpoint_dir, version_name, start_epoch=0, lift_proj_lr_factor=5.0):
+    """Train Stage 2 with frozen blocks. Higher LR for lift/proj layers."""
+    model.to(device)
+    lift_proj_params = []
+    other_params = []
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if 'lift' in name or 'proj' in name:
+                lift_proj_params.append(param)
+            else:
+                other_params.append(param)
+    param_groups = [
+        {'params': lift_proj_params, 'lr': lr * lift_proj_lr_factor},
+        {'params': other_params, 'lr': lr}
+    ]
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=1e-4,
+                                   betas=(0.9, 0.999), eps=1e-8)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=0.0)
+    return _train_stage2_loop(model, train_loader, val_loader, epochs, optimizer, scheduler,
+                              device, checkpoint_dir, version_name, start_epoch)
+
+
+def train_stage2_lift_proj_first(model, train_loader, val_loader, epochs, lr, device, checkpoint_dir, version_name, start_epoch=0):
+    """Train Stage 2 with frozen blocks. Phase 1: lift/proj/global_skip only. Phase 2: add skip_conv."""
+    model.to(device)
+    lift_proj_global_names = ['lift', 'proj1', 'proj2', 'global_skip_proj', 'global_skip_gate']
+    for name, param in model.named_parameters():
+        if param.requires_grad and 'skip_conv' in name:
+            param.requires_grad = False
+    phase1_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(phase1_params, lr=lr, weight_decay=1e-4,
+                                   betas=(0.9, 0.999), eps=1e-8)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=0.0)
+    phase1_epochs = epochs // 2
+    return _train_stage2_phased(model, train_loader, val_loader, epochs, optimizer, scheduler,
+                                device, checkpoint_dir, version_name, start_epoch,
+                                unfreeze_fn=lambda m: _unfreeze_skip_conv(m),
+                                unfreeze_epoch=phase1_epochs)
+
+
+def train_stage2_phased_lift_proj(model, train_loader, val_loader, epochs, lr, device, checkpoint_dir, version_name, start_epoch=0):
+    """Train Stage 2 with frozen blocks. Phased: proj -> lift -> skip_conv -> global_skip."""
+    model.to(device)
+    phase_len = epochs // 4
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            param.requires_grad = False
+    proj_params = []
+    for name, param in model.named_parameters():
+        if 'proj1' in name or 'proj2' in name:
+            param.requires_grad = True
+            proj_params.append(param)
+    optimizer = torch.optim.AdamW(proj_params, lr=lr, weight_decay=1e-4,
+                                   betas=(0.9, 0.999), eps=1e-8)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=0.0)
+    phases = [
+        (phase_len, lambda m: _unfreeze_lift(m)),
+        (2 * phase_len, lambda m: _unfreeze_skip_conv(m)),
+        (3 * phase_len, lambda m: _unfreeze_global_skip(m)),
+    ]
+    return _train_stage2_multi_phased(model, train_loader, val_loader, epochs, lr, optimizer, scheduler,
+                                      device, checkpoint_dir, version_name, start_epoch, phases)
+
+
+def _unfreeze_lift(model):
+    for name, param in model.named_parameters():
+        if 'lift' in name and param.requires_grad is False:
+            param.requires_grad = True
+
+
+def _unfreeze_skip_conv(model):
+    for name, param in model.named_parameters():
+        if 'skip_conv' in name and param.requires_grad is False:
+            param.requires_grad = True
+
+
+def _unfreeze_global_skip(model):
+    for name, param in model.named_parameters():
+        if 'global_skip' in name and param.requires_grad is False:
+            param.requires_grad = True
+
+
+def _train_stage2_loop(model, train_loader, val_loader, epochs, optimizer, scheduler,
+                       device, checkpoint_dir, version_name, start_epoch):
+    """Generic Stage 2 training loop."""
+    resume_checkpoint = os.path.join(checkpoint_dir, f'stage2_{version_name}_resume.pt')
+    if os.path.exists(resume_checkpoint) and start_epoch == 0:
+        print(f"\nResuming from checkpoint: {resume_checkpoint}")
+        checkpoint = torch.load(resume_checkpoint, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint.get('epoch', 0)
+        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        best_epoch = checkpoint.get('best_epoch', start_epoch)
+        print(f"Resuming from epoch {start_epoch}, best val loss: {best_val_loss:.4e} @ epoch {best_epoch+1}")
+    else:
+        best_val_loss = float('inf')
+        best_epoch = start_epoch
+    patience_counter = 0
+    early_stopping_patience = 50
+    for epoch in range(start_epoch, epochs):
+        model.train()
+        train_l1 = 0.0
+        train_rel_l1 = 0.0
+        train_rel_l2 = 0.0
+        for xb, yb in train_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            pred = model(xb)
+            loss = l1_loss(pred, yb)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
+            optimizer.step()
+            train_l1 += loss.item() * xb.size(0)
+            train_rel_l1 += relative_l1_loss(pred, yb).item() * xb.size(0)
+            train_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
+        train_l1 /= len(train_loader.dataset)
+        train_rel_l1 /= len(train_loader.dataset)
+        train_rel_l2 /= len(train_loader.dataset)
+        model.eval()
+        val_l1 = 0.0
+        val_rel_l1 = 0.0
+        val_rel_l2 = 0.0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                pred = model(xb)
+                val_l1 += l1_loss(pred, yb).item() * xb.size(0)
+                val_rel_l1 += relative_l1_loss(pred, yb).item() * xb.size(0)
+                val_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
+        val_l1 /= len(val_loader.dataset)
+        val_rel_l1 /= len(val_loader.dataset)
+        val_rel_l2 /= len(val_loader.dataset)
+        scheduler.step()
+        if val_l1 < best_val_loss:
+            best_val_loss = val_l1
+            best_epoch = epoch
+            patience_counter = 0
+            torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'stage2_{version_name}_best.pt'))
+        else:
+            patience_counter += 1
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            print(f"[Stage 2 {version_name} Epoch {epoch+1:03d}/{epochs}] train_l1={train_l1:.4e} train_rel_l1={train_rel_l1:.4e} train_rel_l2={train_rel_l2:.4e} val_l1={val_l1:.4e} val_rel_l1={val_rel_l1:.4e} val_rel_l2={val_rel_l2:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
+        if (epoch + 1) % 10 == 0:
+            torch.save({'epoch': epoch + 1, 'model_state_dict': model.state_dict(),
+                       'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict(),
+                       'best_val_loss': best_val_loss, 'best_epoch': best_epoch, 'val_rel_l1': val_rel_l1, 'val_rel_l2': val_rel_l2},
+                      os.path.join(checkpoint_dir, f'stage2_{version_name}_resume.pt'))
+        if patience_counter >= early_stopping_patience:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+    return best_val_loss
+
+
+def _train_stage2_phased(model, train_loader, val_loader, epochs, optimizer, scheduler,
+                         device, checkpoint_dir, version_name, start_epoch, unfreeze_fn, unfreeze_epoch):
+    """Stage 2 training with one unfreeze step."""
+    best_val_loss, best_epoch, start_epoch = _load_resume_or_init(model, optimizer, scheduler,
+                                                                  checkpoint_dir, version_name, start_epoch, device)
+    patience_counter = 0
+    early_stopping_patience = 50
+    for epoch in range(start_epoch, epochs):
+        if epoch == unfreeze_epoch:
+            print(f"\nUnfreezing skip_conv at epoch {epoch+1}")
+            unfreeze_fn(model)
+            trainable = [p for p in model.parameters() if p.requires_grad]
+            optimizer = torch.optim.AdamW(trainable, lr=scheduler.get_last_lr()[0], weight_decay=1e-4,
+                                           betas=(0.9, 0.999), eps=1e-8)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs-epoch, eta_min=0.0)
+        best_val_loss, best_epoch, patience_counter = _run_one_epoch(model, train_loader, val_loader,
+            optimizer, scheduler, device, checkpoint_dir, version_name, epoch, epochs,
+            best_val_loss, best_epoch, patience_counter, early_stopping_patience)
+        if patience_counter >= early_stopping_patience:
+            break
+    return best_val_loss
+
+
+def _train_stage2_multi_phased(model, train_loader, val_loader, epochs, lr, optimizer, scheduler,
+                               device, checkpoint_dir, version_name, start_epoch, phases):
+    """Stage 2 training with multiple unfreeze steps."""
+    best_val_loss, best_epoch, start_epoch = _load_resume_or_init(model, optimizer, scheduler,
+                                                                  checkpoint_dir, version_name, start_epoch, device)
+    patience_counter = 0
+    early_stopping_patience = 50
+    for epoch in range(start_epoch, epochs):
+        for thresh, unfreeze_fn in phases:
+            if epoch == thresh:
+                unfreeze_fn(model)
+                trainable = [p for p in model.parameters() if p.requires_grad]
+                optimizer = torch.optim.AdamW(trainable, lr=lr, weight_decay=1e-4,
+                                               betas=(0.9, 0.999), eps=1e-8)
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs-epoch, eta_min=0.0)
+                print(f"\nUnfreezing next phase at epoch {epoch+1}")
+                break
+        best_val_loss, best_epoch, patience_counter = _run_one_epoch(model, train_loader, val_loader,
+            optimizer, scheduler, device, checkpoint_dir, version_name, epoch, epochs,
+            best_val_loss, best_epoch, patience_counter, early_stopping_patience)
+        if patience_counter >= early_stopping_patience:
+            break
+    return best_val_loss
+
+
+def _load_resume_or_init(model, optimizer, scheduler, checkpoint_dir, version_name, start_epoch, device):
+    resume_path = os.path.join(checkpoint_dir, f'stage2_{version_name}_resume.pt')
+    if os.path.exists(resume_path) and start_epoch == 0:
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt['model_state_dict'])
+        if 'optimizer_state_dict' in ckpt and optimizer.param_groups:
+            try:
+                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            except (ValueError, KeyError):
+                pass
+        if 'scheduler_state_dict' in ckpt:
+            try:
+                scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+            except (ValueError, KeyError):
+                pass
+        start_epoch = ckpt.get('epoch', 0)
+        return ckpt.get('best_val_loss', float('inf')), ckpt.get('best_epoch', start_epoch), start_epoch
+    return float('inf'), start_epoch, start_epoch
+
+
+def _run_one_epoch(model, train_loader, val_loader, optimizer, scheduler, device, checkpoint_dir, version_name, epoch, epochs, best_val_loss, best_epoch, patience_counter, early_stopping_patience):
+    model.train()
+    train_l1 = 0.0
+    train_rel_l1 = 0.0
+    train_rel_l2 = 0.0
+    for xb, yb in train_loader:
+        xb, yb = xb.to(device), yb.to(device)
+        optimizer.zero_grad()
+        pred = model(xb)
+        loss = l1_loss(pred, yb)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
+        optimizer.step()
+        train_l1 += loss.item() * xb.size(0)
+        train_rel_l1 += relative_l1_loss(pred, yb).item() * xb.size(0)
+        train_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
+    train_l1 /= len(train_loader.dataset)
+    train_rel_l1 /= len(train_loader.dataset)
+    train_rel_l2 /= len(train_loader.dataset)
+    model.eval()
+    val_l1 = 0.0
+    val_rel_l1 = 0.0
+    val_rel_l2 = 0.0
+    with torch.no_grad():
+        for xb, yb in val_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            pred = model(xb)
+            val_l1 += l1_loss(pred, yb).item() * xb.size(0)
+            val_rel_l1 += relative_l1_loss(pred, yb).item() * xb.size(0)
+            val_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
+    val_l1 /= len(val_loader.dataset)
+    val_rel_l1 /= len(val_loader.dataset)
+    val_rel_l2 /= len(val_loader.dataset)
+    scheduler.step()
+    if val_l1 < best_val_loss:
+        best_val_loss, best_epoch, patience_counter = val_l1, epoch, 0
+        torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'stage2_{version_name}_best.pt'))
+    else:
+        patience_counter += 1
+    if (epoch + 1) % 10 == 0 or epoch == 0:
+        print(f"[Stage 2 {version_name} Epoch {epoch+1:03d}/{epochs}] train_l1={train_l1:.4e} train_rel_l1={train_rel_l1:.4e} train_rel_l2={train_rel_l2:.4e} val_l1={val_l1:.4e} val_rel_l1={val_rel_l1:.4e} val_rel_l2={val_rel_l2:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
+    if (epoch + 1) % 10 == 0:
+        torch.save({'epoch': epoch + 1, 'model_state_dict': model.state_dict(),
+                   'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict(),
+                   'best_val_loss': best_val_loss, 'best_epoch': best_epoch, 'val_rel_l1': val_rel_l1, 'val_rel_l2': val_rel_l2},
+                  os.path.join(checkpoint_dir, f'stage2_{version_name}_resume.pt'))
+    return best_val_loss, best_epoch, patience_counter
 
 
 def train_stage2_progressive_unfreeze(model, train_loader, val_loader, epochs, lr, device, checkpoint_dir, version_name, start_epoch=0):
@@ -540,38 +855,43 @@ def train_stage2_progressive_unfreeze(model, train_loader, val_loader, epochs, l
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs-epoch, eta_min=0.0)
         
         model.train()
-        train_loss = 0.0
+        train_l1 = 0.0
+        train_rel_l1 = 0.0
         train_rel_l2 = 0.0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             pred = model(xb)
-            loss = relative_l1_loss(pred, yb)
+            loss = l1_loss(pred, yb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
             optimizer.step()
-            train_loss += loss.item() * xb.size(0)
+            train_l1 += loss.item() * xb.size(0)
+            train_rel_l1 += relative_l1_loss(pred, yb).item() * xb.size(0)
             train_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
-        train_loss /= len(train_loader.dataset)
+        train_l1 /= len(train_loader.dataset)
+        train_rel_l1 /= len(train_loader.dataset)
         train_rel_l2 /= len(train_loader.dataset)
         
         model.eval()
-        val_loss = 0.0
+        val_l1 = 0.0
+        val_rel_l1 = 0.0
         val_rel_l2 = 0.0
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
-                loss = relative_l1_loss(pred, yb)
-                val_loss += loss.item() * xb.size(0)
+                val_l1 += l1_loss(pred, yb).item() * xb.size(0)
+                val_rel_l1 += relative_l1_loss(pred, yb).item() * xb.size(0)
                 val_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
-        val_loss /= len(val_loader.dataset)
+        val_l1 /= len(val_loader.dataset)
+        val_rel_l1 /= len(val_loader.dataset)
         val_rel_l2 /= len(val_loader.dataset)
         
         scheduler.step()
         
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_l1 < best_val_loss:
+            best_val_loss = val_l1
             best_epoch = epoch
             patience_counter = 0
             checkpoint_path = os.path.join(checkpoint_dir, f'stage2_{version_name}_best.pt')
@@ -580,7 +900,7 @@ def train_stage2_progressive_unfreeze(model, train_loader, val_loader, epochs, l
             patience_counter += 1
         
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"[Stage 2 {version_name} Epoch {epoch+1:03d}/{epochs}] train_rel_l1={train_loss:.4e} train_rel_l2={train_rel_l2:.4e} val_rel_l1={val_loss:.4e} val_rel_l2={val_rel_l2:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
+            print(f"[Stage 2 {version_name} Epoch {epoch+1:03d}/{epochs}] train_l1={train_l1:.4e} train_rel_l1={train_rel_l1:.4e} train_rel_l2={train_rel_l2:.4e} val_l1={val_l1:.4e} val_rel_l1={val_rel_l1:.4e} val_rel_l2={val_rel_l2:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
         
         if (epoch + 1) % 10 == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f'stage2_{version_name}_epoch_{epoch+1}.pt')
@@ -592,7 +912,9 @@ def train_stage2_progressive_unfreeze(model, train_loader, val_loader, epochs, l
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
                 'best_epoch': best_epoch,
-                'unfreeze_epoch': unfreeze_epoch
+                'unfreeze_epoch': unfreeze_epoch,
+                'val_rel_l1': val_rel_l1,
+                'val_rel_l2': val_rel_l2,
             }
             torch.save(checkpoint_data, checkpoint_path)
             torch.save(checkpoint_data, resume_path)
@@ -655,32 +977,37 @@ def train_stage2_lr_warmup(model, train_loader, val_loader, epochs, lr, device, 
     
     for epoch in range(start_epoch, epochs):
         model.train()
-        train_loss = 0.0
+        train_l1 = 0.0
+        train_rel_l1 = 0.0
         train_rel_l2 = 0.0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             pred = model(xb)
-            loss = relative_l1_loss(pred, yb)
+            loss = l1_loss(pred, yb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
             optimizer.step()
-            train_loss += loss.item() * xb.size(0)
+            train_l1 += loss.item() * xb.size(0)
+            train_rel_l1 += relative_l1_loss(pred, yb).item() * xb.size(0)
             train_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
-        train_loss /= len(train_loader.dataset)
+        train_l1 /= len(train_loader.dataset)
+        train_rel_l1 /= len(train_loader.dataset)
         train_rel_l2 /= len(train_loader.dataset)
         
         model.eval()
-        val_loss = 0.0
+        val_l1 = 0.0
+        val_rel_l1 = 0.0
         val_rel_l2 = 0.0
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
-                loss = relative_l1_loss(pred, yb)
-                val_loss += loss.item() * xb.size(0)
+                val_l1 += l1_loss(pred, yb).item() * xb.size(0)
+                val_rel_l1 += relative_l1_loss(pred, yb).item() * xb.size(0)
                 val_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
-        val_loss /= len(val_loader.dataset)
+        val_l1 /= len(val_loader.dataset)
+        val_rel_l1 /= len(val_loader.dataset)
         val_rel_l2 /= len(val_loader.dataset)
         
         if epoch < warmup_epochs:
@@ -688,8 +1015,8 @@ def train_stage2_lr_warmup(model, train_loader, val_loader, epochs, lr, device, 
         else:
             scheduler_cosine.step()
         
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_l1 < best_val_loss:
+            best_val_loss = val_l1
             best_epoch = epoch
             patience_counter = 0
             checkpoint_path = os.path.join(checkpoint_dir, f'stage2_{version_name}_best.pt')
@@ -699,7 +1026,7 @@ def train_stage2_lr_warmup(model, train_loader, val_loader, epochs, lr, device, 
         
         if (epoch + 1) % 10 == 0 or epoch == 0:
             current_lr = scheduler_warmup.get_last_lr()[0] if epoch < warmup_epochs else scheduler_cosine.get_last_lr()[0]
-            print(f"[Stage 2 {version_name} Epoch {epoch+1:03d}/{epochs}] train_rel_l1={train_loss:.4e} train_rel_l2={train_rel_l2:.4e} val_rel_l1={val_loss:.4e} val_rel_l2={val_rel_l2:.4e} lr={current_lr:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
+            print(f"[Stage 2 {version_name} Epoch {epoch+1:03d}/{epochs}] train_l1={train_l1:.4e} train_rel_l1={train_rel_l1:.4e} train_rel_l2={train_rel_l2:.4e} val_l1={val_l1:.4e} val_rel_l1={val_rel_l1:.4e} val_rel_l2={val_rel_l2:.4e} lr={current_lr:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
         
         if (epoch + 1) % 10 == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f'stage2_{version_name}_epoch_{epoch+1}.pt')
@@ -711,7 +1038,9 @@ def train_stage2_lr_warmup(model, train_loader, val_loader, epochs, lr, device, 
                 'scheduler_warmup_state_dict': scheduler_warmup.state_dict(),
                 'scheduler_cosine_state_dict': scheduler_cosine.state_dict(),
                 'best_val_loss': best_val_loss,
-                'best_epoch': best_epoch
+                'best_epoch': best_epoch,
+                'val_rel_l1': val_rel_l1,
+                'val_rel_l2': val_rel_l2,
             }
             torch.save(checkpoint_data, checkpoint_path)
             torch.save(checkpoint_data, resume_path)
@@ -763,14 +1092,15 @@ def train_stage2_knowledge_distillation(model, stage1_model, train_loader, val_l
     
     for epoch in range(start_epoch, epochs):
         model.train()
-        train_loss = 0.0
+        train_l1 = 0.0
+        train_rel_l1 = 0.0
         train_rel_l2 = 0.0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             pred = model(xb)
             
-            loss_task = relative_l1_loss(pred, yb)
+            loss_task = l1_loss(pred, yb)
             
             with torch.no_grad():
                 xb_pca = spatial_to_pca_coefficients_batch(xb, rb, k_in)
@@ -778,34 +1108,38 @@ def train_stage2_knowledge_distillation(model, stage1_model, train_loader, val_l
                 pred_stage1_spatial = pred_stage1_pca @ torch.from_numpy(rb.pca_out.components_[:k_out]).float().to(device) + torch.from_numpy(rb.pca_out.mean_).float().to(device)
                 pred_stage1_spatial = pred_stage1_spatial.view(pred.shape)
             
-            loss_kd = relative_l1_loss(pred, pred_stage1_spatial)
+            loss_kd = l1_loss(pred, pred_stage1_spatial)
             loss = alpha * loss_kd + (1 - alpha) * loss_task
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
             optimizer.step()
-            train_loss += loss_task.item() * xb.size(0)
+            train_l1 += loss_task.item() * xb.size(0)
+            train_rel_l1 += relative_l1_loss(pred, yb).item() * xb.size(0)
             train_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
-        train_loss /= len(train_loader.dataset)
+        train_l1 /= len(train_loader.dataset)
+        train_rel_l1 /= len(train_loader.dataset)
         train_rel_l2 /= len(train_loader.dataset)
         
         model.eval()
-        val_loss = 0.0
+        val_l1 = 0.0
+        val_rel_l1 = 0.0
         val_rel_l2 = 0.0
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
-                loss = relative_l1_loss(pred, yb)
-                val_loss += loss.item() * xb.size(0)
+                val_l1 += l1_loss(pred, yb).item() * xb.size(0)
+                val_rel_l1 += relative_l1_loss(pred, yb).item() * xb.size(0)
                 val_rel_l2 += relative_l2_error(pred, yb) * xb.size(0)
-        val_loss /= len(val_loader.dataset)
+        val_l1 /= len(val_loader.dataset)
+        val_rel_l1 /= len(val_loader.dataset)
         val_rel_l2 /= len(val_loader.dataset)
         
         scheduler.step()
         
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_l1 < best_val_loss:
+            best_val_loss = val_l1
             best_epoch = epoch
             patience_counter = 0
             checkpoint_path = os.path.join(checkpoint_dir, f'stage2_{version_name}_best.pt')
@@ -814,7 +1148,7 @@ def train_stage2_knowledge_distillation(model, stage1_model, train_loader, val_l
             patience_counter += 1
         
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"[Stage 2 {version_name} Epoch {epoch+1:03d}/{epochs}] train_rel_l1={train_loss:.4e} train_rel_l2={train_rel_l2:.4e} val_rel_l1={val_loss:.4e} val_rel_l2={val_rel_l2:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
+            print(f"[Stage 2 {version_name} Epoch {epoch+1:03d}/{epochs}] train_l1={train_l1:.4e} train_rel_l1={train_rel_l1:.4e} train_rel_l2={train_rel_l2:.4e} val_l1={val_l1:.4e} val_rel_l1={val_rel_l1:.4e} val_rel_l2={val_rel_l2:.4e} lr={scheduler.get_last_lr()[0]:.2e} (best: {best_val_loss:.4e} @ epoch {best_epoch+1})")
         
         if (epoch + 1) % 10 == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f'stage2_{version_name}_epoch_{epoch+1}.pt')

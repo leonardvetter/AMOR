@@ -212,29 +212,7 @@ def main():
     print("WEIGHT SIMILARITY ANALYSIS")
     print("="*80)
     
-    print("\nLoading baseline model...")
-    baseline_ckpt = torch.load(args.baseline_checkpoint, map_location='cpu', weights_only=False)
-    baseline_rb_data = baseline_ckpt.get('rb_data', baseline_ckpt.get('rb'))
-    if isinstance(baseline_rb_data, dict):
-        baseline_rb = PCAReducerMultiChannel()
-        baseline_rb.pca_in = baseline_rb_data['pca_in']
-        baseline_rb.pca_out = baseline_rb_data['pca_out']
-        baseline_rb.n_channels = baseline_rb_data['n_channels']
-        baseline_rb.out_channels = baseline_rb_data['out_channels']
-        baseline_rb.shape_ = baseline_rb_data['shape_']
-    else:
-        baseline_rb = baseline_rb_data
-    baseline_model = MRBNO(
-        width=baseline_ckpt.get('width', 24),
-        rb=baseline_rb,
-        k_in=baseline_ckpt.get('k_in', 144),
-        k_out=baseline_ckpt.get('k_out', 144),
-        layers=baseline_ckpt.get('layers', 4),
-    )
-    baseline_model.load_state_dict(baseline_ckpt['model_state_dict'], strict=False)
-    baseline_model.eval()
-    
-    print("Loading Stage 1 model...")
+    print("\nLoading Stage 1 model (to get shared PCA basis)...")
     stage1_ckpt = torch.load(args.stage1_checkpoint, map_location='cpu', weights_only=False)
     stage1_rb_data = stage1_ckpt.get('rb_data', stage1_ckpt.get('rb'))
     if isinstance(stage1_rb_data, dict):
@@ -246,6 +224,36 @@ def main():
         stage1_rb.shape_ = stage1_rb_data['shape_']
     else:
         stage1_rb = stage1_rb_data
+    
+    print("Loading baseline model...")
+    baseline_ckpt = torch.load(args.baseline_checkpoint, map_location='cpu', weights_only=False)
+    baseline_rb_data = baseline_ckpt.get('rb_data', baseline_ckpt.get('rb'))
+    if baseline_rb_data is not None:
+        if isinstance(baseline_rb_data, dict):
+            baseline_rb = PCAReducerMultiChannel()
+            baseline_rb.pca_in = baseline_rb_data['pca_in']
+            baseline_rb.pca_out = baseline_rb_data['pca_out']
+            baseline_rb.n_channels = baseline_rb_data['n_channels']
+            baseline_rb.out_channels = baseline_rb_data['out_channels']
+            baseline_rb.shape_ = baseline_rb_data['shape_']
+        else:
+            baseline_rb = baseline_rb_data
+    else:
+        print("WARNING: Baseline checkpoint doesn't contain rb. Using Stage 1's rb (should be identical).")
+        baseline_rb = stage1_rb
+    baseline_model = MRBNO(
+        width=baseline_ckpt.get('width', 24) if isinstance(baseline_ckpt, dict) else 24,
+        rb=baseline_rb,
+        k_in=baseline_ckpt.get('k_in', 144) if isinstance(baseline_ckpt, dict) else 144,
+        k_out=baseline_ckpt.get('k_out', 144) if isinstance(baseline_ckpt, dict) else 144,
+        layers=baseline_ckpt.get('layers', 4) if isinstance(baseline_ckpt, dict) else 4,
+    )
+    if isinstance(baseline_ckpt, dict) and 'model_state_dict' in baseline_ckpt:
+        baseline_model.load_state_dict(baseline_ckpt['model_state_dict'], strict=False)
+    else:
+        baseline_model.load_state_dict(baseline_ckpt, strict=False)
+    baseline_model.eval()
+    
     stage1_model = MRBNOStage1(
         width=stage1_ckpt.get('width', 24),
         rb=stage1_rb,
@@ -342,6 +350,29 @@ def main():
         stage2_real = extract_real_space_weights(stage2_model)
         stage2_vs_baseline_real = compare_weights(stage2_real, baseline_real, f"Stage 2 {name}", "Baseline")
         print_comparison(stage2_vs_baseline_real, f"Stage 2 {name}", "Baseline")
+        
+        print("\n" + "-"*80)
+        print("REAL SPACE WEIGHTS BREAKDOWN BY LAYER TYPE")
+        print("-"*80)
+        
+        lift_proj_keys = [k for k in stage2_vs_baseline_real['common_keys'] if 'lift' in k or 'proj' in k]
+        skip_conv_keys = [k for k in stage2_vs_baseline_real['common_keys'] if 'skip_conv' in k]
+        global_skip_keys = [k for k in stage2_vs_baseline_real['common_keys'] if 'global_skip' in k]
+        
+        def print_layer_group(keys, group_name):
+            if not keys:
+                return
+            print(f"\n{group_name}:")
+            cos_sims = [stage2_vs_baseline_real['cosine_similarity'][k] for k in keys]
+            rel_l2s = [stage2_vs_baseline_real['relative_l2_distance'][k] for k in keys]
+            print(f"  Cosine Similarity: {np.mean(cos_sims):.6f} (min: {np.min(cos_sims):.6f}, max: {np.max(cos_sims):.6f})")
+            print(f"  Relative L2 Distance: {np.mean(rel_l2s):.6f} (min: {np.min(rel_l2s):.6f}, max: {np.max(rel_l2s):.6f})")
+            for k in keys:
+                print(f"    {k:<50} cos_sim={stage2_vs_baseline_real['cosine_similarity'][k]:>8.6f} rel_l2={stage2_vs_baseline_real['relative_l2_distance'][k]:>8.6f}")
+        
+        print_layer_group(lift_proj_keys, "LIFT/PROJ LAYERS")
+        print_layer_group(skip_conv_keys, "BLOCK SKIP CONV LAYERS")
+        print_layer_group(global_skip_keys, "GLOBAL SKIP LAYERS")
         
         del stage2_model
         import gc

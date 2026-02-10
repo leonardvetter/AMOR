@@ -8,9 +8,11 @@ import torch
 import numpy as np
 import argparse
 import os
+import sys
 # Import from local directory first (for MRBNO and PCAReducer with 3D support)
-sys.path.insert(0, os.path.dirname(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'models'))
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _script_dir)
+sys.path.insert(1, os.path.join(_script_dir, '..', 'models'))
 
 from geofno_loader import prepare_geofno_data
 from losses import LpLoss
@@ -108,7 +110,7 @@ def load_model(checkpoint_path, dataset_type, device):
         init_scale=0.1,
         use_skip_connections=True,
         use_batch_norm=True,
-        use_coordinates=args.get('add_coords', True),
+        use_coordinates=args.get('use_coordinates', args.get('add_coords', False)),
         add_constant_mode=False,
         use_factorized_weights=False
     ).to(device)
@@ -122,7 +124,7 @@ def load_model(checkpoint_path, dataset_type, device):
 def main():
     parser = argparse.ArgumentParser(description='Compute error metrics for all splits')
     parser.add_argument('--dataset_type', type=str, required=True,
-                       choices=['elasticity', 'airfoil'],
+                       choices=['airfoil', 'elasticity', 'pipe', 'plasticity', 'car-cfd', 'channel-shocks'],
                        help='Dataset type')
     parser.add_argument('--checkpoint_path', type=str, required=True,
                        help='Path to model checkpoint')
@@ -166,12 +168,12 @@ def main():
     print("RESULTS")
     print("=" * 80)
     print()
-    print(f"{'Split':<15} {'Rel L1':<15} {'Rel L2':<15} {'Geo-FNO (Rel L2)':<15}")
+    print(f"{'Split':<15} {'Rel L1 (%)':<15} {'Rel L2 (%)':<15} {'Geo-FNO Rel L2 (%)':<15}")
     print("-" * 80)
-    print(f"{'Train':<15} {train_metrics['rel_l1']:<15.6f} {train_metrics['rel_l2']:<15.6f} {train_metrics['geofno']:<15.6f}")
+    print(f"{'Train':<15} {100.0 * train_metrics['rel_l1']:<15.2f} {100.0 * train_metrics['rel_l2']:<15.2f} {100.0 * train_metrics['geofno']:<15.2f}")
     if val_metrics is not None:
-        print(f"{'Validation':<15} {val_metrics['rel_l1']:<15.6f} {val_metrics['rel_l2']:<15.6f} {val_metrics['geofno']:<15.6f}")
-    print(f"{'Test':<15} {test_metrics['rel_l1']:<15.6f} {test_metrics['rel_l2']:<15.6f} {test_metrics['geofno']:<15.6f}")
+        print(f"{'Validation':<15} {100.0 * val_metrics['rel_l1']:<15.2f} {100.0 * val_metrics['rel_l2']:<15.2f} {100.0 * val_metrics['geofno']:<15.2f}")
+    print(f"{'Test':<15} {100.0 * test_metrics['rel_l1']:<15.2f} {100.0 * test_metrics['rel_l2']:<15.2f} {100.0 * test_metrics['geofno']:<15.2f}")
     print("=" * 80)
 
 

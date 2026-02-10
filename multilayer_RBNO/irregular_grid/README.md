@@ -1,98 +1,38 @@
 # Irregular Grid MRBNO
 
-This directory contains implementations and experiments for MRBNO on irregular grids and arbitrary geometries.
+MRBNO training and evaluation on Geo-FNO-style irregular-grid datasets. Uses local `MRBNO.py` and `PCAReducer.py` with 3D (point-cloud) input handling.
 
-## Overview
+## Key files
 
-The `MRBNO_lift_irregular.py` model adapts MRBNO for point clouds and irregular meshes. Unlike the regular grid version (`MRBNO_lift_simple`), this model:
-
-- Uses 1D convolutions (`Conv1d`) instead of 2D (`Conv2d`)
-- Operates on point clouds with arbitrary node positions
-- Assumes constant mesh topology (same node positions across all samples)
-- Supports material-adaptive PCA basis transformation
-- Supports material property conditioning via multi-resolution positional encoding
-
-## Key Files
-
-- **`MRBNO_lift_irregular.py`**: Main model architecture for irregular grids
-- **`train_geofno.py`**: Training script for Geo-FNO datasets (elasticity, airfoil)
-- **`geofno_loader.py`**: Data loader for Geo-FNO datasets
-- **`pca_utils.py`**: Utilities for computing PCA on point cloud data
-- **`data_utils.py`**: Data preprocessing utilities
-- **`run_all_experiments.py`**: Script to run all experiments sequentially
-- **`compute_metrics.py`**: Metrics computation for evaluation
-- **`plot_predictions.py`**: Visualization utilities
-- **`monitor_training.py`**: Training monitoring utilities
+- **`train_geofno.py`**: Training script. Requires `--dataset_path` and `--dataset_type` (airfoil, elasticity, pipe, plasticity, car-cfd, channel-shocks).
+- **`geofno_loader.py`**: Data loader; input/output and splits follow Geo-FNO (see docstring).
+- **`MRBNO.py`**, **`PCAReducer.py`**: Model and PCA reducer for this directory (3D support).
+- **`losses.py`**: LpLoss (absolute/relative Lp, rel_l1). Training uses relative L2 loss.
+- **`compute_metrics.py`**: Computes rel_l1, rel_l2, and Geo-FNO metric on train/val/test.
+- **`download_datasets.py`**, **`download_geofno_datasets.py`**: Dataset download. **`download_geofno_from_drive.sh`**: Shell wrapper for Google Drive download.
+- **`train_all_datasets.py`**: Runs training for all dataset types. **`run_all_experiments.py`**: Runs experiments sequentially.
+- **`plot_predictions.py`**, **`plot_all_datasets.py`**, **`visualize_geofno_datasets.py`**: Plotting. **`monitor_training.py`**, **`monitor_training.sh`**: Training monitoring.
+- **`compare_with_geofno_paper.py`**: Compares with Geo-FNO paper results. **`test_geofno_loader.py`**: Loader tests. **`data_utils.py`**, **`pca_utils.py`**: Data and PCA utilities.
 
 ## Datasets
 
-Supports Geo-FNO datasets:
-- **Elasticity**: Darcy flow on irregular domains with varying material properties
-- **Airfoil**: Flow around airfoils with varying geometries
-
-### Dataset Sources
-
-The datasets are available from:
-- **Google Drive**: https://drive.google.com/drive/folders/1YBuaoTdOSr_qzaow-G-iwvbUI7fiUzu8
-- **GitHub Repository**: https://github.com/neuraloperator/Geo-FNO
-
-### Dataset Details
-
-**Elasticity Dataset**:
-- Input: Mesh coordinates (X, Y) defining the geometry on irregular mesh
-- Output: Stress field (sigma) on the same mesh
-- Mesh: Irregular triangular mesh with varying node positions
-- Split: First 1000 samples for training, last 200 for testing (Geo-FNO standard)
-- Note: Material properties (rr) are available but not used as input; geometry defines material structure
-
-**Airfoil Dataset**:
-- Input: Flow field channels 0-3 (Q field) + X and Y coordinates
-- Output: Flow field channel 4 (Q field)
-- Mesh: Regular grid extracted as point cloud
-- Split: First 1000 samples for training, next 200 for testing (Geo-FNO standard)
-
-### Downloading Datasets
-
-Use the provided scripts to download and prepare the datasets:
-```bash
-# Download datasets from Google Drive or clone Geo-FNO repository
-python download_geofno_datasets.py
-
-# Or use the shell script
-./download_geofno_from_drive.sh
-```
-
-The datasets should be placed in `$SCRATCH/data/Geo-FNO/data/` with the following structure:
-- `diffeo/`: Elasticity dataset files
-- `naca/`: Airfoil dataset files
-
-## Model Architecture
-
-The `MRBNOLiftIrregular` model:
-- Uses a single PCA basis (computed on the point cloud data)
-- Supports coordinate concatenation (`add_coords`)
-- Supports grid-based skip connections (`use_grid_skip`) similar to Geo-FNO
-- Supports direct input-to-output skip connections (`use_input_skip`)
-- Can use material-adaptive PCA basis transformation
+Geo-FNO datasets (elasticity, airfoil, pipe, plasticity, car-cfd, channel-shocks). Sources: [Google Drive](https://drive.google.com/drive/folders/1YBuaoTdOSr_qzaow-G-iwvbUI7fiUzu8), [Geo-FNO GitHub](https://github.com/neuraloperator/Geo-FNO). Place under `$SCRATCH/data/Geo-FNO/data/` (e.g. `diffeo/`, `naca/`).
 
 ## Usage
 
 ```bash
-# Train on elasticity dataset
-python train_geofno.py --dataset elasticity --epochs 300
+# Train (required: --dataset_path, --dataset_type)
+python train_geofno.py --dataset_path $SCRATCH/data/Geo-FNO/data/diffeo --dataset_type elasticity
+python train_geofno.py --dataset_path $SCRATCH/data/Geo-FNO/data/naca --dataset_type airfoil
 
-# Train on airfoil dataset
-python train_geofno.py --dataset airfoil --epochs 300
-
-# Run all experiments
-python run_all_experiments.py
+# Download
+python download_geofno_datasets.py
+# or
+./download_geofno_from_drive.sh
 ```
 
-## Differences from MRBNO_lift_simple
+## .sh, .md, .txt in this directory
 
-1. **Spatial dimensions**: 1D (point clouds) vs 2D (regular grids)
-2. **Convolution type**: `Conv1d` vs `Conv2d`
-3. **Mesh handling**: Supports arbitrary node positions vs fixed grid
-4. **Material conditioning**: Optional material property conditioning
-5. **PCA basis**: Single basis (same as lift_simple), but computed on point cloud data
-
+- **.sh**: `download_geofno_from_drive.sh`, `monitor_training.sh`
+- **.md**: `README.md`, `COMPARISON_RESULTS.md`
+- **.txt**: `comparison_results.txt`, `comparison_run.txt` (generated/output)

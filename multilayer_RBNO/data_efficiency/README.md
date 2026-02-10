@@ -22,14 +22,7 @@ This directory contains code for two-stage training of MRBNO models on the nonli
 **Stage 2**: Fine-tune complete MRBNO.py model on 10% of train/val data
 - Model: `MRBNOStage2` (complete MRBNO.py architecture)
 - **PCA reuse**: Uses PCA from Stage 1 checkpoint (computed on all train/val data)
-- Seven versions:
-  - **Version 1**: Only new weights trained (blocks frozen)
-  - **Version 2**: All weights trained, higher LR for new weights (blocks LR = 0.1 × base LR)
-  - **Version 3**: All weights trained equally
-  - **Version 4**: Progressive unfreezing
-  - **Version 5**: LR warmup for new layers
-  - **Version 6**: Knowledge distillation
-  - **Version 7**: Better initialization for new layers
+- Multiple versions (--version 1 to 11): e.g. 1=frozen blocks, 2=different LR for blocks, 3=equal LR, 4=progressive unfreeze, 5=LR warmup, 6=knowledge distillation, 7=better init, 8–11=lift/proj variants. See `train_stage2.py --help`.
 - Loss: Relative L1 loss in real space
 
 ### 2. Baseline Training
@@ -102,7 +95,7 @@ All models report:
 
 - `train_two_stage.py`: Core training functions and model definitions
 - `train_stage1.py`: Stage 1 training script
-- `train_stage2.py`: Stage 2 training script (3 versions)
+- `train_stage2.py`: Stage 2 training script (versions 1–11)
 - `train_baseline.py`: Baseline training script
 
 ## Notes
