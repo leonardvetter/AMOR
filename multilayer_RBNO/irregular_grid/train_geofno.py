@@ -28,17 +28,14 @@ from MRBNO import MRBNO
 from PCAReducer import PCAReducerMultiChannel
 
 
-def relative_l2_loss(pred, target):
-    """Relative L2 loss (paper Eq. 2): ||pred - target||_2 / ||target||_2, mean over batch."""
+def relative_l1_loss(pred, target):
+    """Compute relative L1 loss: ||pred - target||_1 / ||target||_1"""
     if pred.ndim == 4 and pred.shape[1] == 1:
         pred = pred.squeeze(1)
     if target.ndim == 4 and target.shape[1] == 1:
         target = target.squeeze(1)
-    pred_flat = pred.reshape(pred.size(0), -1)
-    target_flat = target.reshape(target.size(0), -1)
-    diff_norm = torch.norm(pred_flat - target_flat, p=2, dim=1)
-    target_norm = torch.norm(target_flat, p=2, dim=1).clamp(min=1e-8)
-    return (diff_norm / target_norm).mean()
+    error = torch.abs(pred - target)
+    return torch.mean(error / (torch.abs(target) + 1e-10))
 
 
 def train_epoch(model, dataloader, optimizer, criterion, device, max_grad_norm=3.0):
@@ -199,9 +196,9 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False) if val_dataset is not None else None
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
     
-    # Paper uses relative L2 (Eq. 2) for training and testing
-    criterion = relative_l2_loss
-    print("Using Relative L2 Loss")
+    # Use relative L1 loss matching notebook
+    criterion = relative_l1_loss
+    print("Using Relative L1 Loss")
     
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -224,7 +221,7 @@ def main():
     print(f"  Learning rate: {args.lr}")
     print(f"  Weight decay: {args.weight_decay}")
     print(f"  LR schedule: CosineAnnealingLR")
-    print(f"  Loss: Relative L2")
+    print(f"  Loss: Relative L1")
     print(f"  Gradient clipping: max_norm={args.max_grad_norm}")
     print(f"  Early stopping patience: {args.patience}")
     print(f"  Early stopping min_delta: {args.min_delta}")
@@ -258,8 +255,7 @@ def main():
                 best_val_loss = val_loss
                 best_epoch = epoch
                 patience_counter = 0
-                scratch_dir = os.environ.get('SCRATCH', '/pscratch/sd/d/dvod')
-                checkpoint_dir = os.path.join(scratch_dir, 'checkpoints', 'geofno')
+                checkpoint_dir = '/mnt/c/Users/dvod/MRBNO/data/checkpoints/geofno'
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_best_{args.dataset_type}.pt')
                 torch.save({

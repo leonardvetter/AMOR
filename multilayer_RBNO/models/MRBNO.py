@@ -635,26 +635,31 @@ class MRBNO(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through the MRBNO.
-        
+
         Args:
-            x: Input tensor of shape (B, C_in, N, M)
-            
+            x: Input tensor of shape (B, C_in, N, M) for regular grids or (B, C_in, N) for irregular grids
+
         Returns:
-            Output tensor of shape (B, C_out, N, M)
+            Output tensor of shape (B, C_out, N, M) for regular grids or (B, C_out, N) for irregular grids
         """
+        # Handle both 3D (irregular grid) and 4D (regular grid) inputs
+        is_irregular = x.ndim == 3
+        if is_irregular:
+            x = x.unsqueeze(-1)  # (B, C, N) -> (B, C, N, 1)
+
         if x.ndim != 4:
-            raise ValueError(f"Expected 4D input (B, C_in, N, M), got shape {x.shape}")
+            raise ValueError(f"Expected 3D (B, C, N) or 4D (B, C, N, M) input, got shape {x.shape}")
 
         B, C, H, W = x.shape
-        
+
         # Validate input dimensions
         if C != self.C_in:
             raise ValueError(f"Expected {self.C_in} input channels, got {C}")
         if H != self.N or W != self.M:
             raise ValueError(f"Expected spatial dims ({self.N}, {self.M}), got ({H}, {W})")
 
-        # Optional: inject coordinate information
-        if self.use_coordinates and self.coord_embed is not None:
+        # Optional: inject coordinate information (only for regular grids)
+        if self.use_coordinates and self.coord_embed is not None and not is_irregular:
             coords = self._get_coordinate_features(x)
             x = x + self.coord_embed(coords)
 
@@ -670,7 +675,7 @@ class MRBNO(nn.Module):
 
         # Block 0: process in input basis space
         h0 = self.act(self.gate0(self.block0(h)))
-        
+
         if self.use_skip_connections:
             h = h0 + h
         else:
@@ -682,7 +687,7 @@ class MRBNO(nn.Module):
         # Subsequent blocks: process in output basis space
         for block, gate in zip(self.blocks, self.gates):
             residual = self.act(gate(block(h)))
-            
+
             if self.use_skip_connections:
                 h = h + residual
             else:
@@ -697,6 +702,10 @@ class MRBNO(nn.Module):
 
         # Add global skip connection
         y = y + global_skip
+
+        # Return in same format as input (3D for irregular, 4D for regular)
+        if is_irregular:
+            y = y.squeeze(-1)  # (B, C_out, N, 1) -> (B, C_out, N)
 
         return y
 

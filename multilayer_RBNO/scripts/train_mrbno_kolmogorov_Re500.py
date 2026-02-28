@@ -25,7 +25,7 @@ from MRBNO_lift_v3 import MRBNOLiftV3
 from MRBNO_simple import PCAReducerMultiChannel
 
 
-def load_kolmogorov_dataset(data_path='/pscratch/sd/d/dvod/2D_NS_Re500.npy'):
+def load_kolmogorov_dataset(data_path='/mnt/c/Users/dvod/MRBNO/data/2D_NS_Re500.npy'):
     """Load and preprocess Kolmogorov flow dataset."""
     print(f"Loading dataset from {data_path}...")
     data = np.load(data_path, mmap_mode='r')
@@ -209,7 +209,7 @@ def train_model(model, train_loader, val_loader, epochs=300, lr=2e-3, weight_dec
 
 def main():
     parser = argparse.ArgumentParser(description='Train MRBNO on Kolmogorov Flow dataset (Re=500)')
-    parser.add_argument('--data_path', type=str, default='/pscratch/sd/d/dvod/2D_NS_Re500.npy',
+    parser.add_argument('--data_path', type=str, default='/mnt/c/Users/dvod/MRBNO/data/2D_NS_Re500.npy',
                         help='Path to Kolmogorov flow dataset')
     parser.add_argument('--batch_size', type=int, default=16,
                         help='Batch size for training (default: 16 to avoid OOM)')
@@ -224,15 +224,14 @@ def main():
     parser.add_argument('--early_stopping_patience', type=int, default=50,
                         help='Early stopping patience')
     parser.add_argument('--checkpoint_dir', type=str, default=None,
-                        help='Directory to save checkpoint (default: $SCRATCH/checkpoints)')
+                        help='Directory to save checkpoint (default: /mnt/c/Users/dvod/MRBNO/data/checkpoints)')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (cuda/cpu)')
     args = parser.parse_args()
     
-    # Set checkpoint directory to SCRATCH if not specified
+    # Set checkpoint directory if not specified
     if args.checkpoint_dir is None:
-        scratch_dir = os.environ.get('SCRATCH', '/tmp')
-        args.checkpoint_dir = os.path.join(scratch_dir, 'checkpoints')
+        args.checkpoint_dir = '/mnt/c/Users/dvod/MRBNO/data/checkpoints'
     
     # Setup device
     if args.device == 'cuda' and not torch.cuda.is_available():
@@ -268,21 +267,24 @@ def main():
     print(f"PCA components: k_in={k_in}, k_out={k_out}")
     print(f"Boundary condition awareness: bc_weight={rb.bc_weight}, threshold={rb.boundary_threshold}")
     
-    # Create MRBNO model (same as notebook)
+    # Create MRBNO model (matching leonard notebook config)
     print("\n" + "="*70)
-    print("CREATING MRBNO LIFT V3 MODEL")
+    print("CREATING MRBNO MODEL")
     print("="*70)
+    # Use fixed k values like leonard notebook for Kolmogorov
+    width = 40
+    k = 30
     model = MRBNOLiftV3(
-        width=24,
+        width=width,
         rb=rb,
-        k_in=k_in,
-        k_out=k_out,
+        k_in=k,
+        k_out=k,
         layers=4,
         dropout=0.0,
-        init_scale=0.1,
+        init_scale=0.7,
         use_skip_connections=True,
-        use_batch_norm=True,
-        use_coordinates=True,
+        use_batch_norm=False,
+        use_coordinates=False,
     )
     
     params = sum(p.numel() for p in model.parameters())

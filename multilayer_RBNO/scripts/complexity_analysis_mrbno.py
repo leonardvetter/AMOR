@@ -19,6 +19,7 @@ Version 2: Sweep over width and epsilon for fixed width × (1/epsilon)
 Results saved after each dataset. Can restart from where it left off.
 """
 
+import copy
 import numpy as np
 import torch
 import torch.nn as nn
@@ -159,8 +160,9 @@ def train_model(model, train_loader, val_loader, device, hyperparams):
     val_losses = []
     best_val_loss = float('inf')
     best_epoch = 0
+    best_model_state = copy.deepcopy(model.state_dict())
     patience_counter = 0
-    
+
     has_val = len(val_loader.dataset) > 0
     
     for epoch in range(hyperparams['epochs']):
@@ -201,6 +203,7 @@ def train_model(model, train_loader, val_loader, device, hyperparams):
             if val_loss < best_val_loss - hyperparams['early_stopping_min_delta']:
                 best_val_loss = val_loss
                 best_epoch = epoch
+                best_model_state = copy.deepcopy(model.state_dict())
                 patience_counter = 0
                 improved = True
             else:
@@ -209,19 +212,23 @@ def train_model(model, train_loader, val_loader, device, hyperparams):
             if train_loss < best_val_loss - hyperparams['early_stopping_min_delta']:
                 best_val_loss = train_loss
                 best_epoch = epoch
+                best_model_state = copy.deepcopy(model.state_dict())
                 patience_counter = 0
                 improved = True
             else:
                 patience_counter += 1
-        
+
         scheduler.step()
-        
+
         # Early stopping
         if patience_counter >= hyperparams['early_stopping_patience']:
             break
-    
+
+    # Restore best model weights
+    model.load_state_dict(best_model_state)
+
     training_time = time.time() - start_time
-    
+
     return {
         'train_losses': train_losses,
         'val_losses': val_losses,
@@ -316,13 +323,13 @@ def load_dataset(dataset_path, dataset_type, num_samples=10000):
     
     return X, Y, is_complex
 
-def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
+def process_dataset(dataset_name, dataset_type, results_dir, data_dir):
     """Process a single dataset."""
     print(f"\n{'='*70}")
     print(f"Processing dataset: {dataset_name} ({dataset_type})")
     print(f"{'='*70}")
-    
-    dataset_path = os.path.join(scratch_dir, 'data', dataset_name)
+
+    dataset_path = os.path.join(data_dir, dataset_name)
     if not os.path.exists(dataset_path):
         print(f"Warning: Dataset {dataset_path} not found. Skipping.")
         return None
@@ -437,24 +444,24 @@ def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
                 dropout=0.0,
                 init_scale=0.1,
                 use_skip_connections=True,
-                use_batch_norm=True,
-                use_coordinates=True,
+                use_batch_norm=False,
+                use_coordinates=False,
                 add_constant_mode=False,
                 use_factorized_weights=False
             )
-            
+
             num_params = sum(p.numel() for p in model.parameters())
             print(f"  Model parameters: {num_params:,}")
-            
+
             # Train
             set_seed(HYPERPARAMETERS['seed'])
             train_result = train_model(model, train_loader, val_loader, device, HYPERPARAMETERS)
-            
+
             # Evaluate
             train_l1, train_l2 = compute_rel_errors(model, train_loader, device, y_mean, y_std, is_complex)
             val_l1, val_l2 = compute_rel_errors(model, val_loader, device, y_mean, y_std, is_complex)
             test_l1, test_l2 = compute_rel_errors(model, test_loader, device, y_mean, y_std, is_complex)
-            
+
             config_result = {
                 'modes': modes,
                 'width': width,
@@ -470,20 +477,31 @@ def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
                 'best_epoch': train_result['best_epoch'],
                 'training_time': train_result['training_time'],
             }
-            
-            # Save result immediately
+
+            # Save individual config result immediately
             with open(result_path, 'w') as f:
                 json.dump(config_result, f, indent=2)
-            
+
             # Save checkpoint
             torch.save(model.state_dict(), checkpoint_path)
-            
+
             product_results.append(config_result)
             print(f"  Train Rel L1: {train_l1:.4f}%, Val Rel L1: {val_l1:.4f}%, Test Rel L1: {test_l1:.4f}%")
-        
+
+            # Free GPU memory before next config
+            model.cpu()
+            del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         results['configurations'][f'product_{product}'] = product_results
-    
-    # Save complete results
+
+        # Save aggregated results after each product (not just at end)
+        results_file = os.path.join(results_dir, f"{dataset_name.replace('.', '_')}_results.json")
+        with open(results_file, 'w') as f:
+            json.dump(results, f, indent=2)
+
+    # Final save (also updates plots)
     results_file = os.path.join(results_dir, f"{dataset_name.replace('.', '_')}_results.json")
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
@@ -495,12 +513,12 @@ def process_dataset(dataset_name, dataset_type, results_dir, scratch_dir):
     return results
 
 
-def process_dataset_v2(dataset_name, dataset_type, results_dir, scratch_dir):
+def process_dataset_v2(dataset_name, dataset_type, results_dir, data_dir):
     """
     Process dataset with Version 2 sweep: width and epsilon for fixed width × (1/epsilon).
     k_in and k_out are computed from epsilon using rb.k_from_cutoff().
     """
-    dataset_path = os.path.join(scratch_dir, 'data', dataset_name)
+    dataset_path = os.path.join(data_dir, dataset_name)
     if not os.path.exists(dataset_path):
         print(f"Warning: Dataset {dataset_path} not found. Skipping.")
         return None
@@ -619,24 +637,24 @@ def process_dataset_v2(dataset_name, dataset_type, results_dir, scratch_dir):
                 dropout=0.0,
                 init_scale=0.1,
                 use_skip_connections=True,
-                use_batch_norm=True,
-                use_coordinates=True,
+                use_batch_norm=False,
+                use_coordinates=False,
                 add_constant_mode=False,
                 use_factorized_weights=False
             )
-            
+
             num_params = sum(p.numel() for p in model.parameters())
             print(f"  Model parameters: {num_params:,}")
-            
+
             # Train
             set_seed(HYPERPARAMETERS['seed'])
             train_result = train_model(model, train_loader, val_loader, device, HYPERPARAMETERS)
-            
+
             # Evaluate
             train_l1, train_l2 = compute_rel_errors(model, train_loader, device, y_mean, y_std, is_complex)
             val_l1, val_l2 = compute_rel_errors(model, val_loader, device, y_mean, y_std, is_complex)
             test_l1, test_l2 = compute_rel_errors(model, test_loader, device, y_mean, y_std, is_complex)
-            
+
             config_result = {
                 'width': width,
                 'epsilon': epsilon,
@@ -654,20 +672,31 @@ def process_dataset_v2(dataset_name, dataset_type, results_dir, scratch_dir):
                 'best_epoch': train_result['best_epoch'],
                 'training_time': train_result['training_time'],
             }
-            
-            # Save result immediately
+
+            # Save individual config result immediately
             with open(result_path, 'w') as f:
                 json.dump(config_result, f, indent=2)
-            
+
             # Save checkpoint
             torch.save(model.state_dict(), checkpoint_path)
-            
+
             product_results.append(config_result)
             print(f"  Train Rel L1: {train_l1:.4f}%, Val Rel L1: {val_l1:.4f}%, Test Rel L1: {test_l1:.4f}%")
-        
+
+            # Free GPU memory before next config
+            model.cpu()
+            del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         results['configurations'][f'product_{product}'] = product_results
-    
-    # Save complete results
+
+        # Save aggregated results after each product (not just at end)
+        results_file = os.path.join(results_dir, f"{dataset_name.replace('.', '_')}_v2_results.json")
+        with open(results_file, 'w') as f:
+            json.dump(results, f, indent=2)
+
+    # Final save
     results_file = os.path.join(results_dir, f"{dataset_name.replace('.', '_')}_v2_results.json")
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
@@ -773,8 +802,8 @@ def create_plot(results, results_dir, dataset_name):
 
 def main():
     """Main function."""
-    scratch_dir = os.environ.get('SCRATCH', '/tmp')
-    results_dir = os.path.join(scratch_dir, 'complexity_analysis')
+    scratch_dir = '/mnt/c/Users/dvod/MRBNO/data'
+    results_dir = '/mnt/c/Users/dvod/MRBNO/data/complexity_analysis'
     os.makedirs(results_dir, exist_ok=True)
     
     print("="*70)
@@ -812,7 +841,7 @@ def main():
     print("="*70)
     for dataset_name, dataset_type in DATASETS:
         try:
-            result = process_dataset(dataset_name, dataset_type, results_dir, scratch_dir)
+            result = process_dataset(dataset_name, dataset_type, results_dir, scratch_dir)  # scratch_dir is now the data dir
             if result:
                 all_results[dataset_name] = result
         except Exception as e:
@@ -827,7 +856,7 @@ def main():
     print("="*70)
     for dataset_name, dataset_type in DATASETS:
         try:
-            result = process_dataset_v2(dataset_name, dataset_type, results_dir, scratch_dir)
+            result = process_dataset_v2(dataset_name, dataset_type, results_dir, scratch_dir)  # scratch_dir is now the data dir
             if result:
                 all_results_v2[dataset_name] = result
         except Exception as e:
