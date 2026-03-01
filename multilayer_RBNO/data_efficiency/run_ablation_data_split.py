@@ -15,19 +15,17 @@ import shutil
 
 def main():
     parser = argparse.ArgumentParser(description='Data split ablation study')
-    parser.add_argument('--data_path', type=str, default='$SCRATCH/data/nonlinear_diffusion_dataset_big.npz')
+    parser.add_argument('--data_path', type=str, default='/mnt/c/Users/dvod/MRBNO/data/nonlinear_diffusion_dataset_big.npz')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--lr', type=float, default=2e-3)
     parser.add_argument('--device', type=str, default='cuda')
     args = parser.parse_args()
     
-    args.data_path = os.path.expandvars(args.data_path)
-    
-    scratch_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'data_efficiency')
-    log_dir = os.path.join(scratch_dir, 'logs', 'ablation_data_split')
-    checkpoint_dir = os.path.join(scratch_dir, 'checkpoints', 'ablation_data_split')
-    master_log = os.path.join(scratch_dir, 'logs', 'ablation_data_split_master.log')
+    base_dir = '/mnt/c/Users/dvod/MRBNO/data/data_efficiency'
+    log_dir = os.path.join(base_dir, 'logs', 'ablation_data_split')
+    checkpoint_dir = os.path.join(base_dir, 'checkpoints', 'ablation_data_split')
+    master_log = os.path.join(base_dir, 'logs', 'ablation_data_split_master.log')
     
     for d in [log_dir, checkpoint_dir]:
         if os.path.exists(d):

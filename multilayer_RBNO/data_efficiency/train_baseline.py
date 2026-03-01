@@ -126,7 +126,7 @@ def train_baseline(model, train_loader, val_loader, test_loader, epochs, lr, dev
 
 def main():
     parser = argparse.ArgumentParser(description='Baseline training on full dataset')
-    parser.add_argument('--data_path', type=str, default='$SCRATCH/data/nonlinear_diffusion_dataset_big.npz')
+    parser.add_argument('--data_path', type=str, default='/mnt/c/Users/dvod/MRBNO/data/nonlinear_diffusion_dataset_big.npz')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--lr', type=float, default=2e-3)
@@ -139,10 +139,8 @@ def main():
     parser.add_argument('--device', type=str, default='cuda')
     args = parser.parse_args()
     
-    args.data_path = os.path.expandvars(args.data_path)
-    scratch_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'data_efficiency')
-    checkpoint_dir = os.path.join(scratch_dir, 'checkpoints')
-    log_dir = os.path.join(scratch_dir, 'logs')
+    checkpoint_dir = '/mnt/c/Users/dvod/MRBNO/data/data_efficiency/checkpoints'
+    log_dir = '/mnt/c/Users/dvod/MRBNO/data/data_efficiency/logs'
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
     

@@ -106,8 +106,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_samples", type=int, default=10000)
     args = parser.parse_args()
     
-    scratch = os.environ.get('SCRATCH', '/tmp')
-    output_dir = os.path.join(scratch, 'data')
+    output_dir = '/mnt/c/Users/dvod/MRBNO/data'
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, 'helmholtz_dataset_rough.npz')
     lock_file = os.path.join(output_dir, 'helmholtz_dataset_rough.lock')

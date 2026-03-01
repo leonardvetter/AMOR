@@ -21,8 +21,7 @@ def clone_geofno_repo(target_dir: str = None):
         Path to cloned repository
     """
     if target_dir is None:
-        scratch_dir = os.environ.get('SCRATCH', '/pscratch/sd/d/dvod')
-        target_dir = os.path.join(scratch_dir, 'data')
+        target_dir = '/mnt/c/Users/dvod/MRBNO/data/Geo-FNO/data'
     
     os.makedirs(target_dir, exist_ok=True)
     repo_path = os.path.join(target_dir, 'Geo-FNO')

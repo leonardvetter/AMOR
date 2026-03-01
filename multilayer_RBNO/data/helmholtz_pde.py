@@ -444,8 +444,7 @@ if __name__ == "__main__":
     
     num_samples = args.num_samples
     if args.output_dir is None:
-        scratch_dir = os.environ.get('SCRATCH', '/tmp')
-        output_dir = os.path.join(scratch_dir, 'data')
+        output_dir = '/mnt/c/Users/dvod/MRBNO/data'
     else:
         output_dir = args.output_dir
     

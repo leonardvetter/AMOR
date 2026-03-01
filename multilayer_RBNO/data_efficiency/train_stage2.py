@@ -28,7 +28,7 @@ from train_two_stage import (
 
 def main():
     parser = argparse.ArgumentParser(description='Stage 2 training')
-    parser.add_argument('--data_path', type=str, default='$SCRATCH/data/nonlinear_diffusion_dataset_big.npz')
+    parser.add_argument('--data_path', type=str, default='/mnt/c/Users/dvod/MRBNO/data/nonlinear_diffusion_dataset_big.npz')
     parser.add_argument('--stage1_checkpoint', type=str, required=True)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=500)
@@ -44,17 +44,15 @@ def main():
     parser.add_argument('--proj_lr_factor', type=float, default=5.0,
                        help='LR multiplier for proj only in version 11 (default: 5.0)')
     parser.add_argument('--checkpoint_dir', type=str, default=None,
-                       help='Directory for Stage 2 checkpoints (default: $SCRATCH/data_efficiency/checkpoints)')
+                       help='Directory for Stage 2 checkpoints (default: /mnt/c/Users/dvod/MRBNO/data/data_efficiency/checkpoints)')
     parser.add_argument('--device', type=str, default='cuda')
     args = parser.parse_args()
     
-    args.data_path = os.path.expandvars(args.data_path)
-    scratch_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'data_efficiency')
     if args.checkpoint_dir is not None:
         checkpoint_dir = os.path.expandvars(args.checkpoint_dir)
     else:
-        checkpoint_dir = os.path.join(scratch_dir, 'checkpoints')
-    log_dir = os.path.join(scratch_dir, 'logs')
+        checkpoint_dir = '/mnt/c/Users/dvod/MRBNO/data/data_efficiency/checkpoints'
+    log_dir = '/mnt/c/Users/dvod/MRBNO/data/data_efficiency/logs'
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
     

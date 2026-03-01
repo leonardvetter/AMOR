@@ -51,8 +51,7 @@ args = parser.parse_args()
 NUM_SAMPLES = args.num_samples
 N = args.N
 L = 1.0
-scratch = os.environ.get('SCRATCH', '/tmp')
-output_dir = os.path.join(scratch, 'data')
+output_dir = '/mnt/c/Users/dvod/MRBNO/data'
 os.makedirs(output_dir, exist_ok=True)
 if args.output is None:
     SAVE_PATH = os.path.join(output_dir, "nonlinear_diffusion_dataset.npz")

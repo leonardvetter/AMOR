@@ -80,8 +80,7 @@ for i in range(NUM_SAMPLES):
     u_grid = u.value.reshape((N, N), order="C")
     u_dataset[i] = u_grid
 
-scratch = os.environ.get('SCRATCH', '/tmp')
-output_dir = os.path.join(scratch, 'data')
+output_dir = '/mnt/c/Users/dvod/MRBNO/data'
 os.makedirs(output_dir, exist_ok=True)
 output_file = os.path.join(output_dir, 'nonlinear_diffusion_dataset_smooth.npz')
 

@@ -66,8 +66,8 @@ def run_command(cmd, description, log_file):
 
 def main():
     base_dir = "/global/homes/d/dvod/multilayer_RBNO/multilayer_RBNO/irregular_grid"
-    scratch_dir = os.environ.get('SCRATCH', '/pscratch/sd/d/dvod')
-    log_dir = os.path.join(scratch_dir, 'logs', 'geofno_experiments')
+    data_base_dir = '/mnt/c/Users/dvod/MRBNO/data'
+    log_dir = os.path.join(data_base_dir, 'logs', 'geofno_experiments')
     os.makedirs(log_dir, exist_ok=True)
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -91,7 +91,7 @@ def main():
     
     # 2. Elasticity training
     elasticity_log = os.path.join(log_dir, f"training_elasticity_{timestamp}.log")
-    elasticity_data_dir = os.path.join(scratch_dir, 'data', 'Geo-FNO', 'data', 'diffeo')
+    elasticity_data_dir = os.path.join(data_base_dir, 'Geo-FNO', 'data', 'diffeo')
     cmd = [
         sys.executable,
         os.path.join(base_dir, "train_geofno.py"),

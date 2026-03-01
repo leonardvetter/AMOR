@@ -124,13 +124,12 @@ def plot_airfoil_sample(data_dir, sample_idx=0, save_path=None):
 
 
 def main():
-    scratch_dir = os.environ.get('SCRATCH', '/pscratch/sd/d/dvod')
-    geofno_data_dir = os.path.join(scratch_dir, 'data', 'Geo-FNO', 'data')
+    geofno_data_dir = '/mnt/c/Users/dvod/MRBNO/data/Geo-FNO/data'
     
     elasticity_dir = os.path.join(geofno_data_dir, 'diffeo')
     airfoil_dir = os.path.join(geofno_data_dir, 'naca')
     
-    output_dir = os.path.join(scratch_dir, 'data', 'geofno_visualizations')
+    output_dir = '/mnt/c/Users/dvod/MRBNO/data/geofno_visualizations'
     os.makedirs(output_dir, exist_ok=True)
     
     print("=" * 60)

@@ -9,8 +9,8 @@ import sys
 import subprocess
 import time
 
-SCRATCH_DIR = os.environ.get('SCRATCH', '/pscratch/sd/dvod')
-DATA_DIR = os.path.join(SCRATCH_DIR, 'data/Geo-FNO/data')
+DATA_BASE_DIR = '/mnt/c/Users/dvod/MRBNO/data'
+DATA_DIR = os.path.join(DATA_BASE_DIR, 'Geo-FNO/data')
 
 # Dataset configurations
 DATASETS = [

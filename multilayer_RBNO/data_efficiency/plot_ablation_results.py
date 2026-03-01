@@ -139,7 +139,7 @@ def main():
     args = parser.parse_args()
     
     if args.scratch_dir is None:
-        scratch_dir = os.path.join(os.environ.get('SCRATCH', '/tmp'), 'data_efficiency')
+        scratch_dir = '/mnt/c/Users/dvod/MRBNO/data/data_efficiency'
     else:
         scratch_dir = args.scratch_dir
     

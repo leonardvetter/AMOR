@@ -87,12 +87,12 @@ Paper: Li et al. JMLR 24(388) 2023, Table 1 and Table 2. Elasticity from Table 1
 | car-cfd | 700/89/100 | 0.157 | 0.179 |
 | channel-shocks | 1600/200/200 | 0.0038 | 0.0047 |
 
-Val/test loss values from logs (may be rel L1 from earlier runs). Training criterion is now **relative L2** (paper Eq. 2).
+Val/test loss values from logs. Training criterion is **relative L1** (matching leonard version).
 
 ## Run Details
 
 - Comparison: `python3 compare_with_geofno_paper.py --device cpu` (re-run after metric fix to refresh table)
-- MRBNO: width 24, layers 4, PCA modes 144, **relative L2 loss** (paper metric), CosineAnnealingLR
+- MRBNO: width 24, layers 4, PCA modes 144, **relative L1 loss** (training), CosineAnnealingLR
 - Splits: elasticity first 1000 train / last 200 test; airfoil first 1000 train / next 200 test; pipe 1800/300; plasticity 700/200; car-cfd 700/100; channel-shocks 1600/200
 
 **Next steps:** Re-run the comparison script to get corrected MRBNO test rel L2 (%). If pipe or plasticity still show very high test errors, fix data scaling in the loader and retrain those datasets.

@@ -7,9 +7,9 @@ import glob
 from datetime import datetime
 
 def monitor_training():
-    scratch_dir = os.environ.get('SCRATCH', '/pscratch/sd/d/dvod')
-    log_dir = os.path.join(scratch_dir, 'logs', 'geofno_experiments')
-    checkpoint_dir = os.path.join(scratch_dir, 'checkpoints', 'geofno')
+    data_dir = '/mnt/c/Users/dvod/MRBNO/data'
+    log_dir = os.path.join(data_dir, 'logs', 'geofno_experiments')
+    checkpoint_dir = os.path.join(data_dir, 'checkpoints', 'geofno')
     
     print("=" * 60)
     print("Training Progress Monitor")

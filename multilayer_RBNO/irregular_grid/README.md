@@ -7,7 +7,7 @@ MRBNO training and evaluation on Geo-FNO-style irregular-grid datasets. Uses loc
 - **`train_geofno.py`**: Training script. Requires `--dataset_path` and `--dataset_type` (airfoil, elasticity, pipe, plasticity, car-cfd, channel-shocks).
 - **`geofno_loader.py`**: Data loader; input/output and splits follow Geo-FNO (see docstring).
 - **`MRBNO.py`**, **`PCAReducer.py`**: Model and PCA reducer for this directory (3D support).
-- **`losses.py`**: LpLoss (absolute/relative Lp, rel_l1). Training uses relative L2 loss.
+- **`losses.py`**: LpLoss (absolute/relative Lp, rel_l1). Training uses relative L1 loss.
 - **`compute_metrics.py`**: Computes rel_l1, rel_l2, and Geo-FNO metric on train/val/test.
 - **`download_datasets.py`**, **`download_geofno_datasets.py`**: Dataset download. **`download_geofno_from_drive.sh`**: Shell wrapper for Google Drive download.
 - **`train_all_datasets.py`**: Runs training for all dataset types. **`run_all_experiments.py`**: Runs experiments sequentially.

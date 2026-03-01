@@ -9,9 +9,9 @@ import sys
 import subprocess
 import shutil
 
-SCRATCH_DIR = os.environ.get('SCRATCH', '/pscratch/sd/dvod')
-CHECKPOINT_DIR = os.path.join(SCRATCH_DIR, 'checkpoints/geofno')
-OUTPUT_DIR = os.path.join(SCRATCH_DIR, 'data/geofno_predictions')
+DATA_BASE_DIR = '/mnt/c/Users/dvod/MRBNO/data'
+CHECKPOINT_DIR = os.path.join(DATA_BASE_DIR, 'checkpoints/geofno')
+OUTPUT_DIR = os.path.join(DATA_BASE_DIR, 'geofno_predictions')
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FIGURES_DIR = os.path.join(SCRIPT_DIR, 'figures')
 PLOT_SCRIPT = os.path.join(SCRIPT_DIR, 'plot_predictions.py')

@@ -158,9 +158,8 @@ def evaluate_model(model, loader, device, y_mean, y_std):
     return np.mean(rel_l1_errors) * 100, np.mean(rel_l2_errors) * 100
 
 def main():
-    scratch_dir = os.environ.get('SCRATCH', '/tmp')
-    data_dir = os.path.join(scratch_dir, 'data')
-    results_dir = os.path.join(scratch_dir, 'nonlinear_model_comparison')
+    data_dir = '/mnt/c/Users/dvod/MRBNO/data'
+    results_dir = '/mnt/c/Users/dvod/MRBNO/data/nonlinear_model_comparison'
     os.makedirs(results_dir, exist_ok=True)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

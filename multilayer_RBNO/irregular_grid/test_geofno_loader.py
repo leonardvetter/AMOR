@@ -13,7 +13,7 @@ def main():
     
     from download_geofno_datasets import find_geofno_datasets, clone_geofno_repo
     
-    repo_path = "/pscratch/sd/d/dvod/data/Geo-FNO"
+    repo_path = "/mnt/c/Users/dvod/MRBNO/data/Geo-FNO"
     
     if not os.path.exists(repo_path):
         print(f"Repository not found at {repo_path}")

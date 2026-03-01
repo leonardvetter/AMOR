@@ -254,8 +254,7 @@ def main():
     device = torch.device(args.device)
     
     if args.output_dir is None:
-        scratch_dir = os.environ.get('SCRATCH', '/pscratch/sd/d/dvod')
-        args.output_dir = os.path.join(scratch_dir, 'data', 'geofno_predictions')
+        args.output_dir = '/mnt/c/Users/dvod/MRBNO/data/geofno_predictions'
     
     os.makedirs(args.output_dir, exist_ok=True)
     

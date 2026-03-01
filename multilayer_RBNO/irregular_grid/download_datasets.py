@@ -38,7 +38,7 @@ except ImportError:
             sys.path.insert(0, path)
     import gdown
 
-data_dir = os.environ.get('SCRATCH', '/pscratch/sd/dvod') + '/data/Geo-FNO/data'
+data_dir = '/mnt/c/Users/dvod/MRBNO/data/Geo-FNO/data'
 
 folders = [
     ('1PMuOGUO2A9rzAP3YM8ra3v8ybE8X9foh', 'car-cfd'),

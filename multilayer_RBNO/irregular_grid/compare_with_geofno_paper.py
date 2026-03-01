@@ -25,8 +25,8 @@ from losses import LpLoss
 from MRBNO import MRBNO
 from PCAReducer import PCAReducerMultiChannel
 
-SCRATCH = os.environ.get('SCRATCH', '/pscratch/sd/d/dvod')
-CHECKPOINT_DIR = os.path.join(SCRATCH, 'checkpoints', 'geofno')
+DATA_BASE_DIR = '/mnt/c/Users/dvod/MRBNO/data'
+CHECKPOINT_DIR = os.path.join(DATA_BASE_DIR, 'checkpoints', 'geofno')
 
 DATASET_ORDER = ['elasticity', 'airfoil', 'pipe', 'plasticity', 'car-cfd', 'channel-shocks']
 
