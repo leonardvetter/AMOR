@@ -62,10 +62,9 @@ class HyperparameterSweep:
         self.fixed_k_in = k_in
         self.fixed_k_out = k_out
         
-        # Set output directory to SCRATCH/logs if not specified
+        # Set output directory to logs if not specified
         if output_dir is None:
-            scratch_dir = os.environ.get('SCRATCH', '/tmp')
-            output_dir = os.path.join(scratch_dir, 'logs')
+            output_dir = '/mnt/c/Users/dvod/MRBNO/data/logs'
         
         # Set random seed if provided
         if seed is not None:
@@ -1090,10 +1089,9 @@ def main():
     # Determine data path
     if args.data_path is None:
         if args.dataset == 'small':
-            data_path = 'data/nonlinear_diffusion_dataset.npz'
+            data_path = '/mnt/c/Users/dvod/MRBNO/data/nonlinear_diffusion_dataset.npz'
         else:  # big
-            scratch_dir = os.environ.get('SCRATCH', '/pscratch/sd/d/dvod')
-            data_path = os.path.join(scratch_dir, 'nonlinear_diffusion_dataset_big.npz')
+            data_path = '/mnt/c/Users/dvod/MRBNO/data/nonlinear_diffusion_dataset_big.npz'
     else:
         data_path = args.data_path
     

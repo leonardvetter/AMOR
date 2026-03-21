@@ -138,9 +138,8 @@ def train_model(model, train_loader, val_loader, device, hyperparams):
     return best_val_loss, best_epoch
 
 def main():
-    scratch_dir = os.environ.get('SCRATCH', '/tmp')
-    data_dir = os.path.join(scratch_dir, 'data')
-    results_dir = os.path.join(scratch_dir, 'learning_curves_big_nonlinear')
+    data_dir = '/mnt/c/Users/dvod/MRBNO/data'
+    results_dir = '/mnt/c/Users/dvod/MRBNO/data/learning_curves_big_nonlinear'
     os.makedirs(results_dir, exist_ok=True)
     
     dataset_path = os.path.join(data_dir, 'nonlinear_diffusion_dataset_big.npz')

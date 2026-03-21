@@ -15,7 +15,9 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import json
 from typing import Dict, Tuple, List, Optional
-from scipy.linalg import eigh
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
+import scipy.linalg as la
 
 # Script lives at multilayer_RBNO/multilayer_RBNO/mesh_generalization/; repo root is three levels up.
 repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -157,6 +159,222 @@ def evaluate_model(model, test_loader, device='cuda') -> Dict[str, float]:
     Y_pred = np.concatenate(all_pred, axis=0)
     Y_true = np.concatenate(all_true, axis=0)
     return compute_relative_errors(Y_pred, Y_true)
+
+
+# ============================================================
+# P1 FEM utilities for mesh-to-mesh transfer
+# Exact strategies from scratch/fenics_mesh_transfer_demo_no_dolfin.py:
+#   A. Algebraic transfer / prolongation matrix
+#   B. Target-space L² projection (sparse solve)
+#   C. Same L² projection, dense scipy solve
+#   D. Oversampled least-squares / pseudoinverse fit
+#   D+. Weighted variant of D
+# ============================================================
+
+def _make_mesh(n):
+    """UnitSquareMesh(n,n): (n+1)^2 nodes, 2*n^2 triangles on [0,1]^2."""
+    def nid(i, j): return i * (n + 1) + j
+    nodes = np.array([[i / n, j / n] for i in range(n + 1) for j in range(n + 1)], dtype=float)
+    tris = []
+    for i in range(n):
+        for j in range(n):
+            tris.append([nid(i, j), nid(i+1, j), nid(i+1, j+1)])
+            tris.append([nid(i, j), nid(i+1, j+1), nid(i, j+1)])
+    return nodes, np.array(tris, dtype=int), n
+
+
+def _tri_area(v):
+    return 0.5 * ((v[1, 0] - v[0, 0]) * (v[2, 1] - v[0, 1])
+                - (v[2, 0] - v[0, 0]) * (v[1, 1] - v[0, 1]))
+
+
+def _find_tri(n_mesh, x, y):
+    xi = x * n_mesh; yi = y * n_mesh
+    i = int(min(xi, n_mesh - 1)); j = int(min(yi, n_mesh - 1))
+    fx = xi - i; fy = yi - j
+    return 2 * (i * n_mesh + j) if (fx >= fy) else 2 * (i * n_mesh + j) + 1
+
+
+def _bary(v, x, y):
+    T = np.array([[v[1, 0] - v[0, 0], v[2, 0] - v[0, 0]],
+                  [v[1, 1] - v[0, 1], v[2, 1] - v[0, 1]]])
+    lm = np.linalg.solve(T, np.array([x - v[0, 0], y - v[0, 1]]))
+    return np.array([1.0 - lm[0] - lm[1], lm[0], lm[1]])
+
+
+def _clamp(val, lo=1e-10, hi=None):
+    if hi is None: hi = 1.0 - lo
+    return min(max(val, lo), hi)
+
+
+def _eval_p1_batch(nodes, tris, n_mesh, coeffs, pts):
+    """Evaluate P1 FEM function at many points."""
+    out = np.empty(len(pts))
+    for q, (x, y) in enumerate(pts):
+        x = _clamp(x); y = _clamp(y)
+        tid = _find_tri(n_mesh, x, y)
+        tri = tris[tid]
+        lm = _bary(nodes[tri], x, y)
+        out[q] = float(lm @ coeffs[tri])
+    return out
+
+
+def _assemble_mass(nodes, tris):
+    """Consistent P1 mass matrix M_ij = ∫ φ_i φ_j dx."""
+    N = len(nodes)
+    rows, cols, vals = [], [], []
+    for tri in tris:
+        v = nodes[tri]
+        A = abs(_tri_area(v))
+        for p in range(3):
+            for q in range(3):
+                rows.append(tri[p]); cols.append(tri[q])
+                vals.append(A / 12.0 * (2.0 if p == q else 1.0))
+    return sp.csr_matrix((vals, (rows, cols)), shape=(N, N))
+
+
+def _assemble_rhs(nodes_t, tris_t, nodes_s, tris_s, n_s, coeffs_s):
+    """RHS for L² projection: b_i = ∫ u_s(x) φ_i^(t)(x) dx (3-pt edge-midpoint quadrature)."""
+    b = np.zeros(len(nodes_t))
+    for tri in tris_t:
+        v = nodes_t[tri]
+        A = abs(_tri_area(v))
+        m01 = 0.5 * (v[0] + v[1]); m12 = 0.5 * (v[1] + v[2]); m20 = 0.5 * (v[2] + v[0])
+
+        def _us(pt):
+            x = _clamp(pt[0]); y = _clamp(pt[1])
+            tid = _find_tri(n_s, x, y)
+            t = tris_s[tid]; lm = _bary(nodes_s[t], x, y)
+            return float(lm @ coeffs_s[t])
+
+        u01 = _us(m01); u12 = _us(m12); u20 = _us(m20)
+        b[tri[0]] += (A / 6.0) * (u01 + u20)
+        b[tri[1]] += (A / 6.0) * (u01 + u12)
+        b[tri[2]] += (A / 6.0) * (u12 + u20)
+    return b
+
+
+def _create_transfer_matrix(nodes_s, tris_s, n_s, nodes_t):
+    """Prolongation matrix P (n_t × n_s): P[i,j] = barycentric weight of source node j for target node i."""
+    nt, ns = len(nodes_t), len(nodes_s)
+    rows, cols, vals = [], [], []
+    for i, (x, y) in enumerate(nodes_t):
+        x = _clamp(x); y = _clamp(y)
+        tid = _find_tri(n_s, x, y)
+        tri = tris_s[tid]; lm = _bary(nodes_s[tri], x, y)
+        for k in range(3):
+            rows.append(i); cols.append(tri[k]); vals.append(float(lm[k]))
+    return sp.csr_matrix((vals, (rows, cols)), shape=(nt, ns))
+
+
+def _grid_to_mesh(n):
+    """Treat n×n pixel grid as a P1 mesh: make_mesh(n-1) gives n^2 nodes, one per pixel."""
+    return _make_mesh(n - 1)
+
+
+def _apply_transfer(model, X_test, Y_test, n_train, transfer_fn, device, batch_size):
+    """Run model at n_train resolution (bilinear input), apply FEM transfer_fn to each output field."""
+    n_test = X_test.shape[-1]
+    if n_test != n_train:
+        X_in = F.interpolate(torch.from_numpy(X_test).float(),
+                             size=(n_train, n_train), mode='bilinear',
+                             align_corners=False).numpy()
+    else:
+        X_in = X_test
+
+    model.eval()
+    loader = DataLoader(TensorDataset(torch.from_numpy(X_in).float()),
+                        batch_size=batch_size, shuffle=False)
+    preds = []
+    with torch.no_grad():
+        for (xb,) in loader:
+            preds.append(model(xb.to(device)).cpu().numpy())
+    Y_pred_train = np.concatenate(preds, axis=0)  # (N, C, n_train, n_train)
+
+    if n_test == n_train:
+        Y_pred = Y_pred_train
+    else:
+        N, C = Y_pred_train.shape[:2]
+        Y_pred = np.zeros((N, C, n_test, n_test), dtype=np.float32)
+        for i in range(N):
+            for c in range(C):
+                Y_pred[i, c] = transfer_fn(Y_pred_train[i, c], n_train, n_test)
+
+    return compute_relative_errors(Y_pred, Y_test)
+
+
+def strategy_algebraic(model, X_new, Y_new, n_train, device, batch_size=32):
+    """Method A: algebraic transfer via prolongation matrix (exact from scratch file)."""
+    def transfer(field, n_src, n_tgt):
+        nodes_s, tris_s, ns = _grid_to_mesh(n_src)
+        nodes_t, _, _ = _grid_to_mesh(n_tgt)
+        P = _create_transfer_matrix(nodes_s, tris_s, ns, nodes_t)
+        return (P @ field.flatten()).reshape(n_tgt, n_tgt).astype(np.float32)
+    return _apply_transfer(model, X_new, Y_new, n_train, transfer, device, batch_size)
+
+
+def strategy_l2_sparse(model, X_new, Y_new, n_train, device, batch_size=32):
+    """Method B: target L² projection via sparse mass-matrix solve (exact from scratch file)."""
+    def transfer(field, n_src, n_tgt):
+        nodes_s, tris_s, ns = _grid_to_mesh(n_src)
+        nodes_t, tris_t, _ = _grid_to_mesh(n_tgt)
+        M_t = _assemble_mass(nodes_t, tris_t)
+        b = _assemble_rhs(nodes_t, tris_t, nodes_s, tris_s, ns, field.flatten())
+        return spla.spsolve(M_t, b).reshape(n_tgt, n_tgt).astype(np.float32)
+    return _apply_transfer(model, X_new, Y_new, n_train, transfer, device, batch_size)
+
+
+def strategy_l2_dense(model, X_new, Y_new, n_train, device, batch_size=32):
+    """Method C: same L² projection, dense scipy solve (exact from scratch file)."""
+    def transfer(field, n_src, n_tgt):
+        nodes_s, tris_s, ns = _grid_to_mesh(n_src)
+        nodes_t, tris_t, _ = _grid_to_mesh(n_tgt)
+        M_t = _assemble_mass(nodes_t, tris_t)
+        b = _assemble_rhs(nodes_t, tris_t, nodes_s, tris_s, ns, field.flatten())
+        return la.solve(M_t.toarray(), b, assume_a="sym").reshape(n_tgt, n_tgt).astype(np.float32)
+    return _apply_transfer(model, X_new, Y_new, n_train, transfer, device, batch_size)
+
+
+def strategy_pseudoinverse(model, X_new, Y_new, n_train, device, batch_size=32, nx_samp=41):
+    """Method D: oversampled pseudoinverse fit (exact from scratch file)."""
+    def transfer(field, n_src, n_tgt):
+        nodes_s, tris_s, ns = _grid_to_mesh(n_src)
+        nodes_t, tris_t, nt = _grid_to_mesh(n_tgt)
+        xx = np.linspace(0.0, 1.0, nx_samp)
+        pts = np.array([[x, y] for y in xx for x in xx])
+        y_samp = _eval_p1_batch(nodes_s, tris_s, ns, field.flatten(), pts)
+        n_dofs = len(nodes_t)
+        rows_S, cols_S, vals_S = [], [], []
+        for q, (x, y) in enumerate(pts):
+            x = _clamp(x); y = _clamp(y)
+            tid = _find_tri(nt, x, y); tri = tris_t[tid]; lm = _bary(nodes_t[tri], x, y)
+            for k in range(3):
+                rows_S.append(q); cols_S.append(tri[k]); vals_S.append(float(lm[k]))
+        S_t = sp.csr_matrix((vals_S, (rows_S, cols_S)), shape=(len(pts), n_dofs)).toarray()
+        return (la.pinv(S_t) @ y_samp).reshape(n_tgt, n_tgt).astype(np.float32)
+    return _apply_transfer(model, X_new, Y_new, n_train, transfer, device, batch_size)
+
+
+def strategy_weighted_pseudoinverse(model, X_new, Y_new, n_train, device, batch_size=32, nx_samp=41):
+    """Method D+: weighted least-squares variant (exact from scratch file)."""
+    def transfer(field, n_src, n_tgt):
+        nodes_s, tris_s, ns = _grid_to_mesh(n_src)
+        nodes_t, tris_t, nt = _grid_to_mesh(n_tgt)
+        xx = np.linspace(0.0, 1.0, nx_samp)
+        pts = np.array([[x, y] for y in xx for x in xx])
+        y_samp = _eval_p1_batch(nodes_s, tris_s, ns, field.flatten(), pts)
+        n_dofs = len(nodes_t)
+        rows_S, cols_S, vals_S = [], [], []
+        for q, (x, y) in enumerate(pts):
+            x = _clamp(x); y = _clamp(y)
+            tid = _find_tri(nt, x, y); tri = tris_t[tid]; lm = _bary(nodes_t[tri], x, y)
+            for k in range(3):
+                rows_S.append(q); cols_S.append(tri[k]); vals_S.append(float(lm[k]))
+        S_t = sp.csr_matrix((vals_S, (rows_S, cols_S)), shape=(len(pts), n_dofs)).toarray()
+        dx = 1.0 / (nx_samp - 1)
+        w = np.full(len(pts), dx * dx); Wsqrt = np.sqrt(w)
+        return la.lstsq(S_t * Wsqrt[:, None], y_samp * Wsqrt)[0].reshape(n_tgt, n_tgt).astype(np.float32)
+    return _apply_transfer(model, X_new, Y_new, n_train, transfer, device, batch_size)
 
 
 def nodal_interpolation(model, X_new, Y_new, target_res, device='cuda'):
@@ -629,8 +847,7 @@ def mass_matrix_transfer(model, X_new, Y_new, X_train_orig, Y_train_orig,
 
 def main():
     # Setup paths
-    scratch_dir = os.environ.get('SCRATCH', '/pscratch/sd/d/dvod')
-    data_dir = os.path.join(scratch_dir, 'data')
+    data_dir = '/mnt/c/Users/dvod/MRBNO/data'
     base_data_path = os.path.join(data_dir, 'nonlinear_diffusion_dataset.npz')
     
     output_dir = Path(__file__).parent
@@ -694,7 +911,7 @@ def main():
     mrbno_checkpoint = results_dir / 'mrbno_checkpoint.pt'
     pcanet_checkpoint = results_dir / 'pcanet_checkpoint.pt'
     
-    checkpoint_base_dir = Path(scratch_dir) / 'checkpoints'
+    checkpoint_base_dir = Path(data_dir) / 'checkpoints'
     if checkpoint_base_dir.exists():
         for name in ['fno_nonlinear_nonlinear_diffusion_dataset_best.pt', 'fno_nonlinear_best.pt']:
             p = checkpoint_base_dir / name
@@ -873,13 +1090,21 @@ def main():
     print("\n" + "="*70)
     print("TESTING ON DIFFERENT RESOLUTIONS")
     print("="*70)
-    print(f"Training resolution: {train_res}x{train_res}. Test resolutions: {resolutions}. Finest (for PCA-on-finest): {finest_res}.")
+    print(f"Training resolution: {train_res}x{train_res}. Test resolutions: {resolutions}.")
 
-    methods_pca = ['nodal_interpolation', 'l2_projection', 'pca_refitting', 'pca_on_finest', 'mass_matrix']
+    # Transfer strategies — match exactly the 4+1 methods from scratch/fenics_mesh_transfer_demo_no_dolfin.py
+    methods_fem = ['algebraic', 'l2_sparse', 'l2_dense', 'pseudoinverse', 'weighted_pseudoinverse']
+    strategy_fns = {
+        'algebraic':            strategy_algebraic,
+        'l2_sparse':            strategy_l2_sparse,
+        'l2_dense':             strategy_l2_dense,
+        'pseudoinverse':        strategy_pseudoinverse,
+        'weighted_pseudoinverse': strategy_weighted_pseudoinverse,
+    }
     results = {
-        'fno': {},
-        'mrbno': {m: {} for m in methods_pca},
-        'pcanet': {m: {} for m in methods_pca},
+        'fno':    {m: {} for m in methods_fem},
+        'mrbno':  {m: {} for m in methods_fem},
+        'pcanet': {m: {} for m in methods_fem},
     }
     
     for res in resolutions:
@@ -899,75 +1124,27 @@ def main():
             Y_res_norm = (Y_res - y_mean) / (y_std + 1e-8)
         
         res_batch = 8 if res >= 150 else 16
-        # FNO: direct application only (no other method)
-        print("  Testing FNO (direct only)...")
-        if fno_model is not None:
-            try:
-                test_loader = DataLoader(
-                    TensorDataset(
-                        torch.from_numpy(X_res_norm).float(),
-                        torch.from_numpy(Y_res_norm).float()
-                    ),
-                    batch_size=res_batch,
-                    shuffle=False
-                )
-                err_dict = evaluate_model(fno_model, test_loader, device)
-                results['fno'][res] = err_dict
-                print(f"    FNO rel_l1: {err_dict['rel_l1']:.6e}  rel_l2: {err_dict['rel_l2']:.6e}")
-            except Exception as e:
-                print(f"    FNO failed: {e}")
-                results['fno'][res] = None
-        else:
-            print("    FNO model not available, skipping...")
-            results['fno'][res] = None
-        
-        # Test MRBNO with all methods
-        print("  Testing MRBNO...")
-        for method in methods_pca:
-            try:
-                if method == 'nodal_interpolation':
-                    err_dict = nodal_interpolation(mrbno_model, X_res_norm, Y_res_norm, (res, res), mrbno_device)
-                elif method == 'l2_projection':
-                    err_dict = l2_projection(mrbno_model, X_res_norm, Y_res_norm, X_train_norm, Y_train_norm, (res, res), mrbno_device, batch_size=res_batch)
-                elif method == 'pca_refitting':
-                    err_dict = pca_refitting(mrbno_model, X_res_norm, Y_res_norm, X_train_norm, Y_train_norm, (res, res), mrbno_device, batch_size=res_batch)
-                elif method == 'pca_on_finest':
-                    err_dict = pca_on_finest(mrbno_model, X_res_norm, Y_res_norm, (res, res), finest_res, mrbno_device, batch_size=res_batch)
-                elif method == 'mass_matrix':
-                    err_dict = mass_matrix_transfer(mrbno_model, X_res_norm, Y_res_norm, X_train_norm, Y_train_norm, (res, res), mrbno_device, batch_size=res_batch)
-                else:
-                    continue
-                results['mrbno'][method][res] = err_dict
-                print(f"    {method}: rel_l1={err_dict['rel_l1']:.6e}  rel_l2={err_dict['rel_l2']:.6e}")
-            except Exception as e:
-                print(f"    {method} failed: {e}")
-                import traceback
-                traceback.print_exc()
-                results['mrbno'][method][res] = None
-        
-        # Test PCANet with same methods
-        print("  Testing PCANet...")
-        for method in methods_pca:
-            try:
-                if method == 'nodal_interpolation':
-                    err_dict = nodal_interpolation(pcanet_model, X_res_norm, Y_res_norm, (res, res), pcanet_device)
-                elif method == 'l2_projection':
-                    err_dict = l2_projection(pcanet_model, X_res_norm, Y_res_norm, X_train_norm, Y_train_norm, (res, res), pcanet_device, batch_size=res_batch)
-                elif method == 'pca_refitting':
-                    err_dict = pca_refitting(pcanet_model, X_res_norm, Y_res_norm, X_train_norm, Y_train_norm, (res, res), pcanet_device, batch_size=res_batch)
-                elif method == 'pca_on_finest':
-                    err_dict = pca_on_finest(pcanet_model, X_res_norm, Y_res_norm, (res, res), finest_res, pcanet_device, batch_size=res_batch)
-                elif method == 'mass_matrix':
-                    err_dict = mass_matrix_transfer(pcanet_model, X_res_norm, Y_res_norm, X_train_norm, Y_train_norm, (res, res), pcanet_device, batch_size=res_batch)
-                else:
-                    continue
-                results['pcanet'][method][res] = err_dict
-                print(f"    {method}: rel_l1={err_dict['rel_l1']:.6e}  rel_l2={err_dict['rel_l2']:.6e}")
-            except Exception as e:
-                print(f"    {method} failed: {e}")
-                import traceback
-                traceback.print_exc()
-                results['pcanet'][method][res] = None
+
+        # Apply all 5 FEM strategies to every model
+        for model_name, mdl, dev in [('fno', fno_model, device),
+                                      ('mrbno', mrbno_model, mrbno_device),
+                                      ('pcanet', pcanet_model, pcanet_device)]:
+            if mdl is None:
+                print(f"  {model_name.upper()} not available, skipping...")
+                for m in methods_fem:
+                    results[model_name][m][res] = None
+                continue
+            print(f"  Testing {model_name.upper()} with all FEM strategies...")
+            for method in methods_fem:
+                try:
+                    err_dict = strategy_fns[method](mdl, X_res_norm, Y_res_norm, train_res, dev, batch_size=res_batch)
+                    results[model_name][method][res] = err_dict
+                    print(f"    {method}: rel_l1={err_dict['rel_l1']:.6e}  rel_l2={err_dict['rel_l2']:.6e}")
+                except Exception as e:
+                    print(f"    {method} failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    results[model_name][method][res] = None
     
     # Save results
     results_path = results_dir / 'mesh_generalization_results.json'
@@ -981,20 +1158,20 @@ def main():
 
     # Create plots (y-axis: rel L2)
     print("\nCreating plots...")
-    res_list = sorted([r for r in resolutions if r in results.get('fno') or any(results['mrbno'][m].get(r) is not None for m in methods_pca)])
+    res_list = sorted([r for r in resolutions if any(results['mrbno'][m].get(r) is not None for m in methods_fem)])
     if not res_list:
         res_list = sorted(resolutions)
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    # Plot 1: FNO and MRBNO
+    # Plot 1: FNO (algebraic strategy) and MRBNO
     ax = axes[0]
-    fno_vals = [results['fno'].get(r) for r in res_list]
+    fno_vals = [results['fno']['algebraic'].get(r) for r in res_list]
     fno_rel2 = [_rel_l2(v) for v in fno_vals]
     fno_res = [r for r, v in zip(res_list, fno_rel2) if v is not None]
     fno_err = [v for v in fno_rel2 if v is not None]
     if fno_err:
-        ax.plot(fno_res, fno_err, 'o-', label='FNO (direct)', linewidth=2, markersize=8)
-    for method in methods_pca:
+        ax.plot(fno_res, fno_err, 'o-', label='FNO (algebraic)', linewidth=2, markersize=8)
+    for method in methods_fem:
         vals = [results['mrbno'][method].get(r) for r in res_list]
         rel2 = [_rel_l2(v) for v in vals]
         r_plot = [r for r, v in zip(res_list, rel2) if v is not None]
@@ -1009,7 +1186,7 @@ def main():
     ax.grid(True, alpha=0.3)
     # Plot 2: MRBNO methods
     ax = axes[1]
-    for method in methods_pca:
+    for method in methods_fem:
         vals = [results['mrbno'][method].get(r) for r in res_list]
         rel2 = [_rel_l2(v) for v in vals]
         r_plot = [r for r, v in zip(res_list, rel2) if v is not None]
@@ -1024,7 +1201,7 @@ def main():
     ax.grid(True, alpha=0.3)
     # Plot 3: PCANet methods
     ax = axes[2]
-    for method in methods_pca:
+    for method in methods_fem:
         vals = [results['pcanet'][method].get(r) for r in res_list]
         rel2 = [_rel_l2(v) for v in vals]
         r_plot = [r for r, v in zip(res_list, rel2) if v is not None]
@@ -1046,19 +1223,19 @@ def main():
     # Overview plot
     fig, ax = plt.subplots(1, 1, figsize=(10, 6))
     res_list_plot = sorted(resolutions)
-    if any(results['fno'].get(r) is not None for r in res_list_plot):
-        fno_vals = [results['fno'].get(r) for r in res_list_plot]
+    if any(results['fno']['algebraic'].get(r) is not None for r in res_list_plot):
+        fno_vals = [results['fno']['algebraic'].get(r) for r in res_list_plot]
         fno_plot = [r for r, v in zip(res_list_plot, fno_vals) if v is not None]
         fno_err = [_rel_l2(v) for v in fno_vals if v is not None]
         if fno_err:
-            ax.plot(fno_plot, fno_err, 'o-', label='FNO (direct)', linewidth=2, markersize=8)
-    for method in methods_pca:
+            ax.plot(fno_plot, fno_err, 'o-', label='FNO (algebraic)', linewidth=2, markersize=8)
+    for method in methods_fem:
         vals = [results['mrbno'][method].get(r) for r in res_list_plot]
         r_plot = [r for r, v in zip(res_list_plot, vals) if v is not None]
         e_plot = [_rel_l2(v) for v in vals if v is not None]
         if e_plot:
             ax.plot(r_plot, e_plot, 's-', label=f'MRBNO {method}', linewidth=2, markersize=8)
-    for method in methods_pca:
+    for method in methods_fem:
         vals = [results['pcanet'][method].get(r) for r in res_list_plot]
         r_plot = [r for r, v in zip(res_list_plot, vals) if v is not None]
         e_plot = [_rel_l2(v) for v in vals if v is not None]
@@ -1086,18 +1263,20 @@ def main():
     md_lines = [
         "# Mesh generalization results",
         "",
-        f"Training resolution: {train_res}×{train_res}. Test resolutions (all 5): {resolutions}. FNO: direct only.",
+        f"Training resolution: {train_res}×{train_res}. Test resolutions: {resolutions}. Transfer strategies: A=algebraic, B=l2_sparse, C=l2_dense, D=pseudoinverse, D+=weighted_pseudoinverse.",
         "",
         "## Relative L1 and L2 by resolution",
         "",
     ]
-    md_lines.append("| Resolution | FNO (direct) | " + " | ".join([f"MRBNO {m}" for m in methods_pca]) + " | " + " | ".join([f"PCANet {m}" for m in methods_pca]) + " |")
-    md_lines.append("|------------|" + "--------------|" * (1 + len(methods_pca) * 2) + "")
+    md_lines.append("| Resolution | " + " | ".join([f"FNO {m}" for m in methods_fem]) + " | " + " | ".join([f"MRBNO {m}" for m in methods_fem]) + " | " + " | ".join([f"PCANet {m}" for m in methods_fem]) + " |")
+    md_lines.append("|------------|" + "--------------|" * (len(methods_fem) * 3) + "")
     for r in sorted(resolutions):
-        row = [str(r), _fmt(results['fno'].get(r))]
-        for m in methods_pca:
+        row = [str(r)]
+        for m in methods_fem:
+            row.append(_fmt(results['fno'][m].get(r)))
+        for m in methods_fem:
             row.append(_fmt(results['mrbno'][m].get(r)))
-        for m in methods_pca:
+        for m in methods_fem:
             row.append(_fmt(results['pcanet'][m].get(r)))
         md_lines.append("| " + " | ".join(row) + " |")
     md_lines.extend(["", "## Files", "", "- mesh_generalization_results.json", "- mesh_generalization_plots.png", "- mesh_generalization_overview.png", ""])

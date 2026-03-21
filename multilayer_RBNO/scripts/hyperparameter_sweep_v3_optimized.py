@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.join(os.getcwd(), 'multilayer_RBNO'))
 from test_all_models_comprehensive_5seeds import load_kolmogorov_data, prepare_data
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-scratch_dir = os.environ.get('SCRATCH', '/pscratch/sd/dvod')
+scratch_dir = '/mnt/c/Users/dvod/MRBNO/data'
 
 
 def train_model(model, train_loader, val_loader, epochs=300, lr=2e-3, weight_decay=1e-4, 

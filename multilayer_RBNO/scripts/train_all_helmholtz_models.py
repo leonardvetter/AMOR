@@ -17,6 +17,7 @@ Training strategy matches the leonard branch Helmholtz notebooks:
 """
 
 import copy
+import gc
 import json
 import os
 import sys
@@ -41,7 +42,7 @@ from PCAReducer import PCAReducerMultiChannel
 HYPERPARAMETERS = {
     'layers': 4,
     'width': 24,
-    'k': 144,           # Fixed number of PCA modes (k_in = k_out = k), matching leonard notebooks
+    'k': 50,           # Fixed number of PCA modes (k_in = k_out = k), matching leonard notebooks
     'fno_modes': (12, 12),
     'lr': 2e-3,
     'weight_decay': 1e-4,
@@ -49,7 +50,7 @@ HYPERPARAMETERS = {
     'epochs': 300,
     'early_stopping_patience': 50,
     'early_stopping_min_delta': 0.0,
-    'batch_size': 32,
+    'batch_size': 8,
     'seed': 42,
     'train_frac': 0.7,
     'val_frac': 0.2,
@@ -221,6 +222,12 @@ def rebuild_csvs(results_dir):
 
 
 def main():
+    # Ensure conda env bin is in PATH so torch.compile can find g++ for C++ codegen
+    import os as _os
+    _env_bin = _os.path.join(sys.prefix, 'bin')
+    if _env_bin not in _os.environ.get('PATH', ''):
+        _os.environ['PATH'] = _env_bin + ':' + _os.environ.get('PATH', '')
+
     data_dir = '/mnt/c/Users/dvod/MRBNO/data'
     results_dir = '/mnt/c/Users/dvod/MRBNO/data/helmholtz_model_comparison'
     os.makedirs(results_dir, exist_ok=True)
@@ -267,26 +274,30 @@ def main():
         Y_val = (Y_val - Y_mean) / (Y_std + 1e-8)
         Y_test = (Y_test - Y_mean) / (Y_std + 1e-8)
 
+        # Free full arrays — split + normalised copies are now independent
+        del X_full, Y_full
+        gc.collect()
+
         train_loader = DataLoader(
             TensorDataset(
                 torch.from_numpy(X_train).float(),
                 torch.from_numpy(Y_train).float(),
             ),
-            batch_size=HYPERPARAMETERS['batch_size'], shuffle=True,
+            batch_size=HYPERPARAMETERS['batch_size'], shuffle=True, num_workers=2,
         )
         val_loader = DataLoader(
             TensorDataset(
                 torch.from_numpy(X_val).float(),
                 torch.from_numpy(Y_val).float(),
             ),
-            batch_size=HYPERPARAMETERS['batch_size'], shuffle=False,
+            batch_size=HYPERPARAMETERS['batch_size'], shuffle=False, num_workers=2,
         )
         test_loader = DataLoader(
             TensorDataset(
                 torch.from_numpy(X_test).float(),
                 torch.from_numpy(Y_test).float(),
             ),
-            batch_size=HYPERPARAMETERS['batch_size'], shuffle=False,
+            batch_size=HYPERPARAMETERS['batch_size'], shuffle=False, num_workers=2,
         )
 
         # Fit PCA basis (shared by MRBNO and PCANet)
@@ -318,11 +329,10 @@ def main():
 
         def make_fno():
             return FNO2d(
-                modes1=HYPERPARAMETERS['fno_modes'][0],
-                modes2=HYPERPARAMETERS['fno_modes'][1],
-                width=HYPERPARAMETERS['width'],
                 in_channels=1,
                 out_channels=2,
+                width=HYPERPARAMETERS['width'],
+                modes=HYPERPARAMETERS['fno_modes'],
             )
 
         def make_pcanet():
@@ -358,6 +368,11 @@ def main():
             model = model_factory()
             n_params = sum(p.numel() for p in model.parameters())
             print(f"  Parameters: {n_params:,}")
+
+            try:
+                model = torch.compile(model)
+            except Exception:
+                pass  # fall back to eager mode
 
             t0 = time.time()
             best_val_loss, best_epoch = train_model(
@@ -425,11 +440,13 @@ def main():
                         torch.from_numpy(X_cross).float(),
                         torch.from_numpy(Y_cross).float(),
                     ),
-                    batch_size=HYPERPARAMETERS['batch_size'], shuffle=False,
+                    batch_size=HYPERPARAMETERS['batch_size'], shuffle=False, num_workers=2,
                 )
                 cross_l1, cross_l2 = evaluate_model(
                     model, cross_loader, device, Y_mean, Y_std
                 )
+                del X_cross, Y_cross, cross_loader
+                gc.collect()
                 cross_results.append({
                     'train_dataset': train_dataset_type,
                     'test_dataset': test_ds_type,
@@ -445,11 +462,12 @@ def main():
                 json.dump({'main': main_result, 'cross': cross_results}, f, indent=2)
             print(f"  Saved: {result_path}")
 
-            # Free GPU memory before next model
+            # Free memory before next model
             model.cpu()
             del model
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            gc.collect()
 
     # Rebuild aggregate CSVs from all saved per-run JSONs
     print(f"\n{'='*70}")

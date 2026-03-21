@@ -90,20 +90,18 @@ def load_kolmogorov_dataset(data_path='/mnt/c/Users/dvod/MRBNO/data/2D_NS_Re500.
     print(f"  Training samples: {len(X_train)}")
     print(f"  Validation samples: {len(X_val)}")
     
-    # Normalize using train statistics only
-    x_mean = X_train.mean()
-    x_std = X_train.std()
-    y_mean = Y_train.mean()
-    y_std = Y_train.std()
-    
-    X_train = (X_train - x_mean) / (x_std + 1e-8)
-    Y_train = (Y_train - y_mean) / (y_std + 1e-8)
-    X_val = (X_val - x_mean) / (x_std + 1e-8)
-    Y_val = (Y_val - y_mean) / (y_std + 1e-8)
-    
-    print(f"\nNormalization statistics:")
-    print(f"  X: mean={x_mean:.4f}, std={x_std:.4f}")
-    print(f"  Y: mean={y_mean:.4f}, std={y_std:.4f}")
+    # Unified normalization using combined X/Y train statistics so that
+    # the Euler residual (yb - xb) is meaningful in normalized space.
+    xy_mean = np.concatenate([X_train.flatten(), Y_train.flatten()]).mean()
+    xy_std = np.concatenate([X_train.flatten(), Y_train.flatten()]).std()
+
+    X_train = (X_train - xy_mean) / (xy_std + 1e-8)
+    Y_train = (Y_train - xy_mean) / (xy_std + 1e-8)
+    X_val = (X_val - xy_mean) / (xy_std + 1e-8)
+    Y_val = (Y_val - xy_mean) / (xy_std + 1e-8)
+
+    print(f"\nNormalization statistics (unified X/Y):")
+    print(f"  mean={xy_mean:.4f}, std={xy_std:.4f}")
     
     # Convert to PyTorch tensors
     X_train_t = torch.from_numpy(X_train).float()
@@ -114,11 +112,15 @@ def load_kolmogorov_dataset(data_path='/mnt/c/Users/dvod/MRBNO/data/2D_NS_Re500.
     return X_train_t, Y_train_t, X_val_t, Y_val_t, X_train, Y_train
 
 
-def train_model(model, train_loader, val_loader, epochs=300, lr=2e-3, weight_decay=1e-4, 
-                max_grad_norm=3.0, device='cuda', early_stopping_patience=50):
-    """Train model with cosine annealing LR schedule and early stopping."""
+def train_model(model, train_loader, val_loader, epochs=300, lr=2e-3, weight_decay=1e-4,
+                max_grad_norm=3.0, device='cuda', early_stopping_patience=50, dt=1.0):
+    """Train model with Euler residual update and MSE rollout loss.
+
+    Update:   y_{k+1} = y_k + dt * f_theta(y_k)
+    Loss:     sum_i || y_{i+1} - y_i - dt * f_theta(y_i) ||^2
+    """
     start_time = time.time()
-    
+
     model.to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -128,16 +130,16 @@ def train_model(model, train_loader, val_loader, epochs=300, lr=2e-3, weight_dec
         eps=1e-8
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=0.0)
-    criterion = nn.L1Loss()  # L1 training metric; rel_l1/rel_l2 computed and saved on splits
-    
+    criterion = nn.MSELoss()
+
     train_losses = []
     val_losses = []
     best_val_loss = float('inf')
     best_epoch = 0
     patience_counter = 0
-    
+
     has_val = len(val_loader.dataset) > 0
-    
+
     for epoch in range(epochs):
         # Training phase
         model.train()
@@ -145,14 +147,14 @@ def train_model(model, train_loader, val_loader, epochs=300, lr=2e-3, weight_dec
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
-            pred = model(xb)
+            pred = xb + dt * model(xb)  # Euler step: y_{k+1} = y_k + dt * f_theta(y_k)
             loss = criterion(pred, yb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
             optimizer.step()
             train_loss += loss.item() * xb.size(0)
         train_loss /= len(train_loader.dataset)
-        
+
         # Validation phase
         if has_val:
             model.eval()
@@ -160,7 +162,7 @@ def train_model(model, train_loader, val_loader, epochs=300, lr=2e-3, weight_dec
             with torch.no_grad():
                 for xb, yb in val_loader:
                     xb, yb = xb.to(device), yb.to(device)
-                    pred = model(xb)
+                    pred = xb + dt * model(xb)
                     loss = criterion(pred, yb)
                     val_loss += loss.item() * xb.size(0)
             val_loss /= len(val_loader.dataset)
@@ -223,6 +225,8 @@ def main():
                         help='Gradient clipping norm')
     parser.add_argument('--early_stopping_patience', type=int, default=50,
                         help='Early stopping patience')
+    parser.add_argument('--dt', type=float, default=1.0,
+                        help='Time step between snapshots for Euler update (default: 1.0)')
     parser.add_argument('--checkpoint_dir', type=str, default=None,
                         help='Directory to save checkpoint (default: /mnt/c/Users/dvod/MRBNO/data/checkpoints)')
     parser.add_argument('--device', type=str, default='cuda',
@@ -272,7 +276,7 @@ def main():
     print("CREATING MRBNO MODEL")
     print("="*70)
     # Use fixed k values like leonard notebook for Kolmogorov
-    width = 40
+    width = 24
     k = 30
     model = MRBNOLiftV3(
         width=width,
@@ -312,7 +316,8 @@ def main():
         weight_decay=args.weight_decay,
         max_grad_norm=args.max_grad_norm,
         device=device,
-        early_stopping_patience=args.early_stopping_patience
+        early_stopping_patience=args.early_stopping_patience,
+        dt=args.dt,
     )
 
     # Compute rel_l1 and rel_l2 on train and val splits
@@ -322,7 +327,7 @@ def main():
         with torch.no_grad():
             for xb, yb in loader:
                 xb, yb = xb.to(device), yb.to(device)
-                pred = model(xb)
+                pred = xb + args.dt * model(xb)  # Euler step
                 b = pred.size(0)
                 pred_flat = pred.view(b, -1)
                 y_flat = yb.view(b, -1)

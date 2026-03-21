@@ -127,14 +127,8 @@ class PCANet(nn.Module):
         # Decode back to function space
         y_flat = self.decode(z_out)  # (B, D_out)
         
-        # Reshape to spatial dimensions
-        if self.C_out == 1:
-            y = y_flat.reshape(B, self.C_out, self.N, self.M)
-        else:
-            # Multi-channel output: reshape carefully
-            y_reshaped = y_flat.reshape(B, self.C_out, self.C_out, self.N * self.M)
-            y = torch.stack([y_reshaped[:, i, i, :] for i in range(self.C_out)], dim=1)
-            y = y.reshape(B, self.C_out, self.N, self.M)
+        # Reshape to spatial dimensions (D_out = C_out * N * M)
+        y = y_flat.reshape(B, self.C_out, self.N, self.M)
         
         return y
 
