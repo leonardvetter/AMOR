@@ -193,7 +193,7 @@ def main():
     
     if not args.stage2_checkpoints:
         if args.checkpoint_dir is None:
-            checkpoint_dir = '/mnt/c/Users/dvod/MRBNO/data/data_efficiency/checkpoints'
+            checkpoint_dir = '/users/PAS3244/dvoderhol/data/data_efficiency/checkpoints'
         else:
             checkpoint_dir = args.checkpoint_dir
         import glob

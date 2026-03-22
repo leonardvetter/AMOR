@@ -7,7 +7,7 @@ import glob
 from datetime import datetime
 
 def monitor_training():
-    data_dir = '/mnt/c/Users/dvod/MRBNO/data'
+    data_dir = '/users/PAS3244/dvoderhol/data'
     log_dir = os.path.join(data_dir, 'logs', 'geofno_experiments')
     checkpoint_dir = os.path.join(data_dir, 'checkpoints', 'geofno')
     

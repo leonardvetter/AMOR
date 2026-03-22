@@ -255,7 +255,7 @@ def main():
                 best_val_loss = val_loss
                 best_epoch = epoch
                 patience_counter = 0
-                checkpoint_dir = '/mnt/c/Users/dvod/MRBNO/data/checkpoints/geofno'
+                checkpoint_dir = '/users/PAS3244/dvoderhol/data/checkpoints/geofno'
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_best_{args.dataset_type}.pt')
                 torch.save({

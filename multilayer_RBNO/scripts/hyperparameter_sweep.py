@@ -64,7 +64,7 @@ class HyperparameterSweep:
         
         # Set output directory to logs if not specified
         if output_dir is None:
-            output_dir = '/mnt/c/Users/dvod/MRBNO/data/logs'
+            output_dir = '/users/PAS3244/dvoderhol/data/logs'
         
         # Set random seed if provided
         if seed is not None:
@@ -1089,9 +1089,9 @@ def main():
     # Determine data path
     if args.data_path is None:
         if args.dataset == 'small':
-            data_path = '/mnt/c/Users/dvod/MRBNO/data/nonlinear_diffusion_dataset.npz'
+            data_path = '/users/PAS3244/dvoderhol/data/nonlinear_diffusion_dataset.npz'
         else:  # big
-            data_path = '/mnt/c/Users/dvod/MRBNO/data/nonlinear_diffusion_dataset_big.npz'
+            data_path = '/users/PAS3244/dvoderhol/data/nonlinear_diffusion_dataset_big.npz'
     else:
         data_path = args.data_path
     

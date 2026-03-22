@@ -139,7 +139,7 @@ def main():
     args = parser.parse_args()
     
     if args.scratch_dir is None:
-        scratch_dir = '/mnt/c/Users/dvod/MRBNO/data/data_efficiency'
+        scratch_dir = '/users/PAS3244/dvoderhol/data/data_efficiency'
     else:
         scratch_dir = args.scratch_dir
     

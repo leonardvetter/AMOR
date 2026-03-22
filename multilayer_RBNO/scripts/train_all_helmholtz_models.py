@@ -228,8 +228,8 @@ def main():
     if _env_bin not in _os.environ.get('PATH', ''):
         _os.environ['PATH'] = _env_bin + ':' + _os.environ.get('PATH', '')
 
-    data_dir = '/mnt/c/Users/dvod/MRBNO/data'
-    results_dir = '/mnt/c/Users/dvod/MRBNO/data/helmholtz_model_comparison'
+    data_dir = '/users/PAS3244/dvoderhol/data'
+    results_dir = '/users/PAS3244/dvoderhol/data/helmholtz_model_comparison'
     os.makedirs(results_dir, exist_ok=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

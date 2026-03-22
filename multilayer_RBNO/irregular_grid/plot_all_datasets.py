@@ -9,7 +9,7 @@ import sys
 import subprocess
 import shutil
 
-DATA_BASE_DIR = '/mnt/c/Users/dvod/MRBNO/data'
+DATA_BASE_DIR = '/users/PAS3244/dvoderhol/data'
 CHECKPOINT_DIR = os.path.join(DATA_BASE_DIR, 'checkpoints/geofno')
 OUTPUT_DIR = os.path.join(DATA_BASE_DIR, 'geofno_predictions')
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

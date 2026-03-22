@@ -444,7 +444,7 @@ if __name__ == "__main__":
     
     num_samples = args.num_samples
     if args.output_dir is None:
-        output_dir = '/mnt/c/Users/dvod/MRBNO/data'
+        output_dir = '/users/PAS3244/dvoderhol/data'
     else:
         output_dir = args.output_dir
     

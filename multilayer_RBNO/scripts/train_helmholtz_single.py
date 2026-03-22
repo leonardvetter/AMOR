@@ -207,8 +207,8 @@ def main():
     dataset_type = args.dataset
 
     train_dataset_name = DATASET_FILE[dataset_type]
-    data_dir     = '/mnt/c/Users/dvod/MRBNO/data'
-    results_dir  = '/mnt/c/Users/dvod/MRBNO/data/helmholtz_model_comparison'
+    data_dir     = '/users/PAS3244/dvoderhol/data'
+    results_dir  = '/users/PAS3244/dvoderhol/data/helmholtz_model_comparison'
     os.makedirs(results_dir, exist_ok=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

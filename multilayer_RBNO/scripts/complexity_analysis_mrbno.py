@@ -802,8 +802,8 @@ def create_plot(results, results_dir, dataset_name):
 
 def main():
     """Main function."""
-    scratch_dir = '/mnt/c/Users/dvod/MRBNO/data'
-    results_dir = '/mnt/c/Users/dvod/MRBNO/data/complexity_analysis'
+    scratch_dir = '/users/PAS3244/dvoderhol/data'
+    results_dir = '/users/PAS3244/dvoderhol/data/complexity_analysis'
     os.makedirs(results_dir, exist_ok=True)
     
     print("="*70)

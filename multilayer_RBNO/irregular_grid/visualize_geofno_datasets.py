@@ -124,12 +124,12 @@ def plot_airfoil_sample(data_dir, sample_idx=0, save_path=None):
 
 
 def main():
-    geofno_data_dir = '/mnt/c/Users/dvod/MRBNO/data/Geo-FNO/data'
+    geofno_data_dir = '/users/PAS3244/dvoderhol/data/Geo-FNO/data'
     
     elasticity_dir = os.path.join(geofno_data_dir, 'diffeo')
     airfoil_dir = os.path.join(geofno_data_dir, 'naca')
     
-    output_dir = '/mnt/c/Users/dvod/MRBNO/data/geofno_visualizations'
+    output_dir = '/users/PAS3244/dvoderhol/data/geofno_visualizations'
     os.makedirs(output_dir, exist_ok=True)
     
     print("=" * 60)

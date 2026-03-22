@@ -479,8 +479,8 @@ def process_dataset(dataset_name, dataset_type, results_dir, data_dir):
 
 
 def main():
-    results_dir = '/mnt/c/Users/dvod/MRBNO/data/pca_sweep_analysis'
-    data_dir = '/mnt/c/Users/dvod/MRBNO/data'
+    results_dir = '/users/PAS3244/dvoderhol/data/pca_sweep_analysis'
+    data_dir = '/users/PAS3244/dvoderhol/data'
     os.makedirs(results_dir, exist_ok=True)
 
     print("PCA Sweep Analysis for MRBNO Lift Simple")

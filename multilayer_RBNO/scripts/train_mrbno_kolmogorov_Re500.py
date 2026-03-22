@@ -25,7 +25,7 @@ from MRBNO_lift_v3 import MRBNOLiftV3
 from MRBNO_simple import PCAReducerMultiChannel
 
 
-def load_kolmogorov_dataset(data_path='/mnt/c/Users/dvod/MRBNO/data/2D_NS_Re500.npy'):
+def load_kolmogorov_dataset(data_path='/users/PAS3244/dvoderhol/data/2D_NS_Re500.npy'):
     """Load and preprocess Kolmogorov flow dataset."""
     print(f"Loading dataset from {data_path}...")
     data = np.load(data_path, mmap_mode='r')
@@ -211,7 +211,7 @@ def train_model(model, train_loader, val_loader, epochs=300, lr=2e-3, weight_dec
 
 def main():
     parser = argparse.ArgumentParser(description='Train MRBNO on Kolmogorov Flow dataset (Re=500)')
-    parser.add_argument('--data_path', type=str, default='/mnt/c/Users/dvod/MRBNO/data/2D_NS_Re500.npy',
+    parser.add_argument('--data_path', type=str, default='/users/PAS3244/dvoderhol/data/2D_NS_Re500.npy',
                         help='Path to Kolmogorov flow dataset')
     parser.add_argument('--batch_size', type=int, default=16,
                         help='Batch size for training (default: 16 to avoid OOM)')
@@ -228,14 +228,14 @@ def main():
     parser.add_argument('--dt', type=float, default=1.0,
                         help='Time step between snapshots for Euler update (default: 1.0)')
     parser.add_argument('--checkpoint_dir', type=str, default=None,
-                        help='Directory to save checkpoint (default: /mnt/c/Users/dvod/MRBNO/data/checkpoints)')
+                        help='Directory to save checkpoint (default: /users/PAS3244/dvoderhol/data/checkpoints)')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (cuda/cpu)')
     args = parser.parse_args()
     
     # Set checkpoint directory if not specified
     if args.checkpoint_dir is None:
-        args.checkpoint_dir = '/mnt/c/Users/dvod/MRBNO/data/checkpoints'
+        args.checkpoint_dir = '/users/PAS3244/dvoderhol/data/checkpoints'
     
     # Setup device
     if args.device == 'cuda' and not torch.cuda.is_available():

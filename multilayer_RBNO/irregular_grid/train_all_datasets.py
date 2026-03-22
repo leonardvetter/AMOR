@@ -9,7 +9,7 @@ import sys
 import subprocess
 import time
 
-DATA_BASE_DIR = '/mnt/c/Users/dvod/MRBNO/data'
+DATA_BASE_DIR = '/users/PAS3244/dvoderhol/data'
 DATA_DIR = os.path.join(DATA_BASE_DIR, 'Geo-FNO/data')
 
 # Dataset configurations

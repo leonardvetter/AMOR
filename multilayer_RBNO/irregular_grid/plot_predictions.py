@@ -254,7 +254,7 @@ def main():
     device = torch.device(args.device)
     
     if args.output_dir is None:
-        args.output_dir = '/mnt/c/Users/dvod/MRBNO/data/geofno_predictions'
+        args.output_dir = '/users/PAS3244/dvoderhol/data/geofno_predictions'
     
     os.makedirs(args.output_dir, exist_ok=True)
     

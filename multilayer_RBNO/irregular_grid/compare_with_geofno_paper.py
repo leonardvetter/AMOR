@@ -25,7 +25,7 @@ from losses import LpLoss
 from MRBNO import MRBNO
 from PCAReducer import PCAReducerMultiChannel
 
-DATA_BASE_DIR = '/mnt/c/Users/dvod/MRBNO/data'
+DATA_BASE_DIR = '/users/PAS3244/dvoderhol/data'
 CHECKPOINT_DIR = os.path.join(DATA_BASE_DIR, 'checkpoints', 'geofno')
 
 DATASET_ORDER = ['elasticity', 'airfoil', 'pipe', 'plasticity', 'car-cfd', 'channel-shocks']

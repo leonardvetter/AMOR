@@ -66,7 +66,7 @@ def run_command(cmd, description, log_file):
 
 def main():
     base_dir = "/global/homes/d/dvod/multilayer_RBNO/multilayer_RBNO/irregular_grid"
-    data_base_dir = '/mnt/c/Users/dvod/MRBNO/data'
+    data_base_dir = '/users/PAS3244/dvoderhol/data'
     log_dir = os.path.join(data_base_dir, 'logs', 'geofno_experiments')
     os.makedirs(log_dir, exist_ok=True)
     

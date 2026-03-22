@@ -80,7 +80,7 @@ for i in range(NUM_SAMPLES):
     u_grid = u.value.reshape((N, N), order="C")
     u_dataset[i] = u_grid
 
-output_dir = '/mnt/c/Users/dvod/MRBNO/data'
+output_dir = '/users/PAS3244/dvoderhol/data'
 os.makedirs(output_dir, exist_ok=True)
 output_file = os.path.join(output_dir, 'nonlinear_diffusion_dataset_smooth.npz')
 

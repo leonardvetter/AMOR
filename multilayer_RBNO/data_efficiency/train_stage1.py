@@ -22,7 +22,7 @@ from train_two_stage import (
 
 def main():
     parser = argparse.ArgumentParser(description='Stage 1 training')
-    parser.add_argument('--data_path', type=str, default='/mnt/c/Users/dvod/MRBNO/data/nonlinear_diffusion_dataset_big.npz')
+    parser.add_argument('--data_path', type=str, default='/users/PAS3244/dvoderhol/data/nonlinear_diffusion_dataset_big.npz')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--lr', type=float, default=2e-3)
@@ -37,7 +37,7 @@ def main():
     parser.add_argument('--stage1_ratio', type=float, default=0.9,
                        help='Fraction of train/val data to use for Stage 1 (default: 0.9)')
     parser.add_argument('--checkpoint_dir', type=str, default=None,
-                       help='Directory to save checkpoints (default: /mnt/c/Users/dvod/MRBNO/data/data_efficiency/checkpoints)')
+                       help='Directory to save checkpoints (default: /users/PAS3244/dvoderhol/data/data_efficiency/checkpoints)')
     parser.add_argument('--checkpoint_name', type=str, default='stage1_final.pt',
                        help='Name for final checkpoint file (default: stage1_final.pt)')
     parser.add_argument('--device', type=str, default='cuda')
@@ -46,8 +46,8 @@ def main():
     if args.checkpoint_dir is not None:
         checkpoint_dir = args.checkpoint_dir
     else:
-        checkpoint_dir = '/mnt/c/Users/dvod/MRBNO/data/data_efficiency/checkpoints'
-    log_dir = '/mnt/c/Users/dvod/MRBNO/data/data_efficiency/logs'
+        checkpoint_dir = '/users/PAS3244/dvoderhol/data/data_efficiency/checkpoints'
+    log_dir = '/users/PAS3244/dvoderhol/data/data_efficiency/logs'
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
     

@@ -431,7 +431,7 @@ def prepare_geofno_data(data_path: str,
     from data_utils import IrregularGridDataset
     
     if output_dir is None:
-        output_dir = '/mnt/c/Users/dvod/MRBNO/data/Geo-FNO/data/geofno'
+        output_dir = '/users/PAS3244/dvoderhol/data/Geo-FNO/data/geofno'
     
     os.makedirs(output_dir, exist_ok=True)
     

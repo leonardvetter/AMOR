@@ -14,14 +14,14 @@ import shutil
 
 def main():
     parser = argparse.ArgumentParser(description='PCA epsilon ablation study')
-    parser.add_argument('--data_path', type=str, default='/mnt/c/Users/dvod/MRBNO/data/nonlinear_diffusion_dataset_big.npz')
+    parser.add_argument('--data_path', type=str, default='/users/PAS3244/dvoderhol/data/nonlinear_diffusion_dataset_big.npz')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--lr', type=float, default=2e-3)
     parser.add_argument('--device', type=str, default='cuda')
     args = parser.parse_args()
     
-    base_dir = '/mnt/c/Users/dvod/MRBNO/data/data_efficiency'
+    base_dir = '/users/PAS3244/dvoderhol/data/data_efficiency'
     log_dir = os.path.join(base_dir, 'logs', 'ablation_pca_epsilon')
     checkpoint_dir = os.path.join(base_dir, 'checkpoints', 'ablation_pca_epsilon')
     master_log = os.path.join(base_dir, 'logs', 'ablation_pca_epsilon_master.log')

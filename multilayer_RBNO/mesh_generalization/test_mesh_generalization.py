@@ -847,7 +847,7 @@ def mass_matrix_transfer(model, X_new, Y_new, X_train_orig, Y_train_orig,
 
 def main():
     # Setup paths
-    data_dir = '/mnt/c/Users/dvod/MRBNO/data'
+    data_dir = '/users/PAS3244/dvoderhol/data'
     base_data_path = os.path.join(data_dir, 'nonlinear_diffusion_dataset.npz')
     
     output_dir = Path(__file__).parent

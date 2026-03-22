@@ -138,8 +138,8 @@ def train_model(model, train_loader, val_loader, device, hyperparams):
     return best_val_loss, best_epoch
 
 def main():
-    data_dir = '/mnt/c/Users/dvod/MRBNO/data'
-    results_dir = '/mnt/c/Users/dvod/MRBNO/data/learning_curves_big_nonlinear'
+    data_dir = '/users/PAS3244/dvoderhol/data'
+    results_dir = '/users/PAS3244/dvoderhol/data/learning_curves_big_nonlinear'
     os.makedirs(results_dir, exist_ok=True)
     
     dataset_path = os.path.join(data_dir, 'nonlinear_diffusion_dataset_big.npz')

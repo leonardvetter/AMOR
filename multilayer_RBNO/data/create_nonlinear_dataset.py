@@ -51,7 +51,7 @@ args = parser.parse_args()
 NUM_SAMPLES = args.num_samples
 N = args.N
 L = 1.0
-output_dir = '/mnt/c/Users/dvod/MRBNO/data'
+output_dir = '/users/PAS3244/dvoderhol/data'
 os.makedirs(output_dir, exist_ok=True)
 if args.output is None:
     SAVE_PATH = os.path.join(output_dir, "nonlinear_diffusion_dataset.npz")
