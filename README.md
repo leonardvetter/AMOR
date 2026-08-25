@@ -1,16 +1,16 @@
-# Multi-layer Reduced Basis Neural Operator (MRBNO)
+# AMOR -- Adaptive Modal Operator Refinement
 
-Repository for training and evaluating Multi-layer Reduced Basis Neural Operators (MRBNO) and related models on PDE datasets.
+Repository for training and evaluating AMOR and related models on PDE datasets.
 
 ## Overview
 
 - **FNO**: Fourier Neural Operator (spectral operations via FFT).
-- **MRBNO**: Multi-layer Reduced Basis Neural Operator; separate input/output PCA bases with basis transition blocks.
+- **AMOR**: Adaptive Modal Operator Refinement.
 - **PCANet**: Neural network in PCA coefficient space.
 
 ## Models
 
-### MRBNO
+### AMOR
 
 - Blocks: Block 0 (input → input), Block 1 (input → output), Blocks 2+ (output → output). Data as (B, width, C*H*W). Weight tensor 4D (width, modes); optional factorized form when k_in×k_out > 10000. Scalar gates, global skip, batch norm in latent space.
 
