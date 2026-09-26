@@ -1,0 +1,25 @@
+name: amor
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.12
+  - pytorch=2.7.1
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - tqdm
+  - scikit-learn
+  - einops
+  - fenics-dolfin
+  - jax
+  - jaxtyping
+  - pip
+  - pip:
+      - meshio
+      - gmsh
+      - FiPy
+      # 3D FNO baseline (FlowBench / elastostatics):
+      - neuraloperator

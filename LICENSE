@@ -1,0 +1,5 @@
+# License text to be added before public release.
+#
+# Until then, if you use this software or the associated datasets, cite:
+#   - the AMOR paper (see README.md Citation)
+#   - Zenodo / third-party data sources listed in README.md (Kolmogorov, FlowBench, hippyflow, …)

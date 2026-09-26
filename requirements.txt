@@ -1,0 +1,16 @@
+# Core runtime deps for AMOR training / data generation.
+# Helmholtz also needs fenics-dolfin + hippylib/hippyflow (not on PyPI; set HIPPYLIB_PATH / HIPPYFLOW_PATH).
+# Rib mesh: gmsh + meshio. Nonlinear GP: jax. Nonlinear PDE: FiPy.
+
+torch>=2.0
+numpy
+scipy
+einops
+scikit-learn
+tqdm
+matplotlib
+meshio
+gmsh
+FiPy
+jax
+neuraloperator  # 3D FNO baseline (FlowBench / elastostatics)

@@ -1,0 +1,310 @@
+"""Unified Helmholtz dataset generator (hippyflow 2D Helmholtz PDE).
+
+Presets (sigma, rho):
+  ultrasmooth → (0.1, 0.6)
+  smooth      → (0.2, 0.4)
+  standard    → (0.4, 0.2)
+
+Example: python generate_helmholtz.py --preset smooth --num_samples 10000
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from AMOR.paths import expand  # noqa: E402
+
+import os
+import sys
+import numpy as np
+import math
+
+# DOLFIN JIT cache on SCRATCH (avoids home quota).
+os.environ.setdefault('XDG_CACHE_HOME', os.path.join(os.environ.get('SCRATCH', '/tmp'), 'dolfin_cache'))
+os.environ.setdefault('DOLFIN_CACHE_DIR', os.path.join(os.environ.get('SCRATCH', '/tmp'), 'dolfin_cache'))
+os.makedirs(os.environ['XDG_CACHE_HOME'], exist_ok=True)
+
+conda_env_path = os.path.expanduser('~/.conda/envs/test_fenics')
+if os.path.exists(conda_env_path):
+    pkgconfig_path = os.path.join(conda_env_path, 'lib', 'pkgconfig')
+    if os.path.exists(pkgconfig_path):
+        current_pkg_config = os.environ.get('PKG_CONFIG_PATH', '')
+        os.environ['PKG_CONFIG_PATH'] = pkgconfig_path + (':' + current_pkg_config if current_pkg_config else '')
+    lib_path = os.path.join(conda_env_path, 'lib')
+    if os.path.exists(lib_path):
+        current_ld_path = os.environ.get('LD_LIBRARY_PATH', '')
+        os.environ['LD_LIBRARY_PATH'] = lib_path + (':' + current_ld_path if current_ld_path else '')
+
+if os.environ.get('HIPPYLIB_PATH'):
+    sys.path.insert(0, os.environ.get('HIPPYLIB_PATH'))
+if os.environ.get('HIPPYFLOW_PATH'):
+    sys.path.insert(0, os.environ.get('HIPPYFLOW_PATH'))
+if os.path.exists(os.path.join(os.environ.get('SCRATCH', '/tmp'), 'python_packages')):
+    sys.path.insert(0, os.path.join(os.environ.get('SCRATCH', '/tmp'), 'python_packages'))
+
+# Linker needs conda sysroot for libmvec_nonshared.a on this cluster.
+sysroot_lib64 = os.path.join(conda_env_path, 'x86_64-conda-linux-gnu', 'sysroot', 'usr', 'lib64')
+if os.path.exists(sysroot_lib64):
+    current_lib_path = os.environ.get('LIBRARY_PATH', '')
+    os.environ['LIBRARY_PATH'] = sysroot_lib64 + (':' + current_lib_path if current_lib_path else '')
+
+sys.path.insert(0, os.path.dirname(__file__))
+
+import dijitso.build as dijitso_build
+_original_make_compile_command = dijitso_build.make_compile_command
+
+
+def patched_make_compile_command(src_filename, lib_filename, dependencies, build_params, cache_params):
+    cmd = _original_make_compile_command(src_filename, lib_filename, dependencies, build_params, cache_params)
+    if os.path.exists(sysroot_lib64):
+        sysroot_lib64_abs = os.path.abspath(sysroot_lib64)
+        sysroot_abs = os.path.abspath(os.path.join(conda_env_path, 'x86_64-conda-linux-gnu', 'sysroot'))
+        lib_path_flag = f'-L{sysroot_lib64_abs}'
+        if lib_path_flag not in cmd:
+            cmd.insert(1, lib_path_flag)
+        sysroot_flag = f'-Wl,--sysroot={sysroot_abs}'
+        if sysroot_flag not in ' '.join(cmd):
+            cmd.insert(1, sysroot_flag)
+        lib_file = os.path.join(sysroot_lib64_abs, 'libmvec_nonshared.a')
+        if os.path.exists(lib_file):
+            for i, arg in enumerate(cmd):
+                if '/usr/lib64/libmvec_nonshared.a' in arg:
+                    cmd[i] = arg.replace('/usr/lib64/libmvec_nonshared.a', lib_file)
+        library_path_flag = f'-Wl,--library-path={sysroot_lib64_abs}'
+        if library_path_flag not in ' '.join(cmd):
+            for i, arg in enumerate(cmd):
+                if arg.startswith('-o') or (i > 0 and cmd[i - 1] == '-o'):
+                    cmd.insert(i, library_path_flag)
+                    break
+    return cmd
+
+
+dijitso_build.make_compile_command = patched_make_compile_command
+
+import dolfin as dl
+from mpi4py import MPI
+import hippylib as hp
+from helmholtz_pde import setup_helmholtz_problem, extract_to_grid, extract_vector_to_grid
+
+PRESETS = {
+    "ultrasmooth": (0.1, 0.6),  # paper (sigma, rho)
+    "smooth": (0.2, 0.4),
+    "standard": (0.4, 0.2),
+}
+
+
+def helmholtz_settings(sigma: float, rho: float):
+    settings = {}
+    settings["seed"] = 0
+    settings["nx"] = 100
+    settings["frequency"] = 600
+    settings["sigma"] = sigma
+    settings["rho"] = rho
+    settings["theta0"] = 1.0
+    settings["theta1"] = 1.0
+    settings["alpha"] = 0.25 * math.pi
+    settings["comm_mesh"] = MPI.COMM_SELF
+    return settings
+
+
+if __name__ == "__main__":
+    import argparse
+    import fcntl
+    import time
+
+    parser = argparse.ArgumentParser(description="Generate Helmholtz dataset (BiLaplacian prior)")
+    parser.add_argument("--preset", choices=sorted(PRESETS), required=True)
+    parser.add_argument("--num_samples", type=int, default=10000)
+    args = parser.parse_args()
+    SIGMA, RHO = PRESETS[args.preset]
+    OUT_NAME = f"helmholtz_sigma_{SIGMA}_rho_{RHO}.npz"
+
+    output_dir = expand('${AMOR_SCRATCH_DATA}')
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, OUT_NAME)
+    lock_file = os.path.join(output_dir, OUT_NAME + '.lock')
+
+    lock_fd = None
+    try:
+        lock_fd = open(lock_file, 'w')
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_fd.write(str(os.getpid()))
+        lock_fd.flush()
+    except IOError:
+        print(f"Another process is already running for {output_file}. Exiting.", flush=True)
+        if lock_fd:
+            lock_fd.close()
+        sys.exit(1)
+
+    # np.savez_compressed appends .npz → recovery path is *.tmp.npz
+    temp_file = output_file + '.tmp.npz'
+    if os.path.exists(temp_file):
+        print(f"Found temporary file at {temp_file}, attempting recovery...", flush=True)
+        try:
+            test_data = np.load(temp_file, allow_pickle=False)
+            test_samples = len(test_data['m'])
+            test_data.close()
+            print(f"Temporary file is valid with {test_samples} samples. Recovering...", flush=True)
+            if os.path.exists(output_file):
+                backup_file = output_file + '.corrupted_backup'
+                print(f"Backing up corrupted main file to {backup_file}", flush=True)
+                try:
+                    os.rename(output_file, backup_file)
+                except OSError:
+                    pass
+            os.rename(temp_file, output_file)
+            print(f"Recovery successful. Using recovered file with {test_samples} samples.", flush=True)
+        except Exception as e:
+            print(f"Temporary file is also corrupted ({e}). Will try main file.", flush=True)
+
+    start_idx = 0
+    if os.path.exists(output_file):
+        print(f"Existing dataset found at {output_file}", flush=True)
+        existing_samples = None
+        max_retries = 50
+        retry_delay = 5
+        for attempt in range(max_retries):
+            try:
+                existing_data = np.load(output_file, allow_pickle=False)
+                existing_samples = len(existing_data['m'])
+                existing_data.close()
+                print(f"Found {existing_samples} existing samples", flush=True)
+                if existing_samples >= args.num_samples:
+                    print(
+                        f"Dataset already complete ({existing_samples} >= {args.num_samples}). Exiting.",
+                        flush=True,
+                    )
+                    sys.exit(0)
+                start_idx = existing_samples
+                print(f"Resuming from sample {start_idx}", flush=True)
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(
+                        f"Attempt {attempt + 1}/{max_retries}: Could not read file ({e}). "
+                        f"Retrying in {retry_delay} seconds...",
+                        flush=True,
+                    )
+                    time.sleep(retry_delay)
+                else:
+                    print(
+                        f"ERROR: Could not load existing dataset after {max_retries} attempts ({e}).",
+                        flush=True,
+                    )
+                    print("EXITING to prevent data loss.", flush=True)
+                    sys.exit(1)
+
+    settings = helmholtz_settings(SIGMA, RHO)
+    Vh, pde, prior, observable = setup_helmholtz_problem(settings)
+    box = [0., 0., 3., 3.]
+    nx = settings["nx"]
+
+    if start_idx == 0:
+        m_dataset = []
+        u_real_dataset = []
+        u_imag_dataset = []
+    else:
+        max_retries = 50
+        retry_delay = 5
+        for attempt in range(max_retries):
+            try:
+                existing_data = np.load(output_file, allow_pickle=False)
+                m_dataset = list(existing_data['m'])
+                u_real_dataset = list(existing_data['u_real'])
+                u_imag_dataset = list(existing_data['u_imag'])
+                existing_data.close()
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(
+                        f"Attempt {attempt + 1}/{max_retries}: Could not load data ({e}). "
+                        f"Retrying in {retry_delay} seconds...",
+                        flush=True,
+                    )
+                    time.sleep(retry_delay)
+                else:
+                    print(
+                        f"ERROR: Could not load existing data after {max_retries} attempts ({e}).",
+                        flush=True,
+                    )
+                    print("EXITING to prevent data loss.", flush=True)
+                    sys.exit(1)
+
+    np.random.seed(settings["seed"] + start_idx)
+
+    if start_idx == 0:
+        print(f"Generating {args.num_samples} Helmholtz samples...", flush=True)
+    else:
+        remaining = args.num_samples - start_idx
+        print(
+            f"Generating {remaining} additional samples (will have {args.num_samples} total)...",
+            flush=True,
+        )
+
+    for i in range(start_idx, args.num_samples):
+        if (i + 1) % 100 == 0:
+            print(f"Progress: {i + 1}/{args.num_samples}", flush=True)
+
+        noise = dl.Vector()
+        prior.init_vector(noise, "noise")
+        noise.set_local(np.random.randn(noise.local_size()))
+        noise.apply("")
+        m = pde.generate_parameter()
+        prior.init_vector(m, 0)
+        prior.sample(noise, m)
+        x = [None, m, None]
+        state = pde.generate_state()
+        pde.solveFwd(state, x)
+
+        m_func = hp.vector2Function(m, Vh[hp.PARAMETER])
+        u_func = hp.vector2Function(state, Vh[hp.STATE])
+
+        m_grid = extract_to_grid(m_func, box, nx, nx)
+        u_real_grid, u_imag_grid = extract_vector_to_grid(u_func, box, nx, nx)
+
+        m_dataset.append(m_grid)
+        u_real_dataset.append(u_real_grid)
+        u_imag_dataset.append(u_imag_grid)
+
+        if (i + 1) % 25 == 0 or (i + 1) == args.num_samples:
+            temp_file_base = output_file + '.tmp'
+            temp_file = temp_file_base + '.npz'
+            try:
+                np.savez_compressed(
+                    temp_file_base,
+                    m=np.array(m_dataset),
+                    u_real=np.array(u_real_dataset),
+                    u_imag=np.array(u_imag_dataset),
+                    nx=nx,
+                    box=box,
+                    num_samples=len(m_dataset),
+                    settings=settings,
+                )
+                if not os.path.exists(temp_file):
+                    raise IOError(f"Temp file {temp_file} was not created")
+                test_load = np.load(temp_file, allow_pickle=False)
+                test_load.close()
+                if os.path.exists(output_file):
+                    os.remove(output_file)
+                os.rename(temp_file, output_file)
+                if not os.path.exists(output_file):
+                    raise IOError(f"Rename failed: {output_file} does not exist after rename")
+                file_size = os.path.getsize(output_file) / (1024 ** 2)
+                print(f"Saved {len(m_dataset)} samples. File size: {file_size:.2f} MB", flush=True)
+            except Exception as e:
+                print(f"ERROR saving at sample {i + 1}: {e}", flush=True)
+                for cleanup_file in [temp_file, temp_file_base]:
+                    if os.path.exists(cleanup_file):
+                        try:
+                            os.remove(cleanup_file)
+                        except OSError:
+                            pass
+                raise
+
+    print(f"Dataset saved to {output_file}, {len(m_dataset)} samples", flush=True)
+    if lock_fd:
+        lock_fd.close()
+        try:
+            os.remove(lock_file)
+        except OSError:
+            pass
