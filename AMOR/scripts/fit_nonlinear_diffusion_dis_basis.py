@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fit Roseberry DIS rows using the FiPy Jacobian from generate_nonlinear_fvar_5_flen_0.2_mvar_1_mlen_0.3.py.
+"""Fit Roseberry DIS rows using the FiPy Jacobian from generate_nonlinear_diffusion.py --preset medium.
 
 Default: Zahm option-2 prior_cov (GEVP Hφ=λ C^{-1}φ). Use --input_metric identity for legacy.
 """

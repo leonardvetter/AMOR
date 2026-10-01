@@ -211,7 +211,7 @@ def fit_mesh_alternative_basis_mass(
 ):
     """Mesh alternative bases compatible with PCAReducerMultiChannelMass."""
     from .mass.mesh_mass import mass_diag_stacked
-    from .mass.PCAReducer_mass import PCAReducerMultiChannelMass, pca_like_from_rows_mass
+    from .PCAReducer import PCAReducerMultiChannelMass, pca_like_from_rows_mass
 
     x_in, num_samples, c_in, n, m = _flatten_samples(samples)
     if solution.ndim == 3:

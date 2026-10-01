@@ -2,7 +2,7 @@
 """
 Fit PCA + train-split normalization for bcfield rib (same path as training).
 
-Methodology matches train_amor_aircraft_rib_bcfield.py:
+Methodology matches train_amor_aircraft_rib.py --dataset bcfield:
   build_field_tensors -> split(seed,70/20/10) -> normalize(train) ->
   PCAReducerMultiChannel(svd_solver=randomized, random_state=seed).fit(xtr4, ytr4)
 

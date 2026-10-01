@@ -1,25 +1,40 @@
 # Adaptive Modal Operator Refinement (AMOR)
 
-Code to train AMOR / FNO / PCANet and reproduce the numerical experiments in the AMOR paper.
-**Datasets are not shipped in this repository**; obtain them from Zenodo (see the paper and Citation below). Generators under `AMOR/data/` document how those datasets were produced.
+Code for the AMOR paper: train AMOR / FNO / PCANet, regenerate the paper datasets, and apply the same AMOR class to a new grid or mesh problem.
 
-## Layout
+**Dataset binaries are not in this repository.** AMOR-generated datasets are on Zenodo ([upload 18815516](https://zenodo.org/uploads/18815516)). Third-party sets (Kolmogorov, FlowBench) are linked under Citation.
+
+There is **one** AMOR implementation: `AMOR.models.amor.AMOR`. Mass weighting, FiLM, coordinates, 2D/3D layout, and trainable QR/Cayley bases are constructor options.
+
+## Repository layout
 
 ```
 AMOR/
-  paths.py           # AMOR_DATA_ROOT / AMOR_SCRATCH_DATA (default: ~/data)
-  models/            # amor.py (unified AMOR), FNO, PCANet, reducers, bases/, mass/
-  datasets/          # loaders and splits (kolmogorov, helmholtz family, rib, 3D, …)
-  training/          # loops (2D / 3D / timestep), metrics, checkpoint I/O, SLURM
-  data/              # generators only (no dataset binaries)
-  scripts/           # runnable entry points only (train / eval / fit / timing)
-  data_efficiency/
-  mesh_generalization/
+  paths.py              # AMOR_DATA_ROOT / AMOR_SCRATCH_DATA (default: ~/data)
+  models/
+    amor.py             # unified AMOR
+    PCAReducer.py       # 2D / mesh PCA (+ mass-weighted PCA)
+    PCAReducerVolume.py # 3D volume PCA
+    FNO_model.py        # 2D FNO baseline
+    FNO3d_neuralop.py   # 3D FNO baseline
+    PCANet.py
+    bases/              # PCA helpers, polynomials, Laplacian, learnable QR/Cayley
+    mass/               # lumped nodal mass helper
+  datasets/             # loaders and splits (no binaries)
+  training/             # shared loops, metrics, checkpoint helpers
+  data/                 # dataset generators only
+  scripts/              # train / eval / fit / timing entry points
+  data_efficiency/      # two-stage SI experiments
+  mesh_generalization/  # resolution-transfer SI experiments
 ```
 
-Import from the repository root as a package, e.g.
-`from AMOR.models.amor import AMOR`. Scripts put that root on `sys.path`
-themselves, so they run from any working directory with no extra setup.
+Scripts put the repository root on `sys.path`. From any working directory:
+
+```bash
+python AMOR/scripts/train_kolmogorov.py --re 40 --models AMOR
+```
+
+Paths default through environment variables (see Local paths). Override with `--data_path`, `--data-path`, or `--data-dir` on each script (`--help`).
 
 ## Environment
 
@@ -28,69 +43,121 @@ conda env create -f environment.yml
 conda activate amor
 ```
 
-Also required for some experiments: hippylib/hippyflow (`HIPPYLIB_PATH`, `HIPPYFLOW_PATH`) for Helmholtz; place Zenodo datasets under `$AMOR_DATA_ROOT` as expected by each script.
+Helmholtz generation also needs hippylib / hippyflow (`HIPPYLIB_PATH`, `HIPPYFLOW_PATH`).
 
-## Data
+## Local paths
 
-Download the project Zenodo release (paper / record) into `$AMOR_DATA_ROOT` (override with `AMOR_SCRATCH_DATA` if needed). Expected layout is defined by the trainers (e.g. `helmholtz_sigma_*_rho_*.npz`, `nonlinear_fvar_*.npz`, `2D_NS_Re{40,500,5000}.npy`, elastostatics NPZ, FlowBench LDC, aircraft-rib NPZ).
+| Variable | Default | Role |
+|---|---|---|
+| `AMOR_DATA_ROOT` | `~/data` | Zenodo downloads and paper arrays |
+| `AMOR_SCRATCH_DATA` | same as `AMOR_DATA_ROOT` | large intermediates / results |
+| `AMOR_MESHES_DIR` | `$AMOR_DATA_ROOT/meshes_3d` | rib mesh NPZs |
+| `AMOR_RIB_DATASETS` | `$AMOR_DATA_ROOT/aircraft_rib/datasets` | rib NPZs |
 
-The aircraft-rib CAD STEP used to build the mesh is **not** redistributed here; it is cited in the paper. Generators under `AMOR/data/aircraft_rib/` assume a local STEP path if you rebuild meshes.
+After downloading Zenodo into `$AMOR_DATA_ROOT`, the trainers expect names such as:
 
-## Reproduce experiments
+- `helmholtz_sigma_*_rho_*.npz`
+- `nonlinear_fvar_*.npz`
+- `2D_NS_Re{40,500,5000}.npy` (Kolmogorov; separate Zenodo)
+- `3d_elastostatics/elastostatics3d_*.npz`
+- FlowBench LDC under the path used by `train_flowbench_ldc3d_single.py --data-dir`
+- `aircraft_rib/datasets/aircraft_rib_*.npz`
 
-On structured 2D benchmarks, AMOR and PCANet use `k_in = k_out = 144`; FNO uses `12×12` Fourier modes per axis. Width/depth follow each trainer (SI model table).
+## Reproduce paper experiments
 
-All entry points live in `AMOR/scripts/`. Trainers that cover several dataset
-variants select them with flags rather than separate files; with no flags they
-run every variant and model of that family.
+On structured 2D benchmarks, AMOR and PCANet use `k_in = k_out = 144` and FNO uses `12×12` Fourier modes unless a trainer overrides them. Width and depth follow each script (SI model table). Reported `test_rel_l1` / `test_rel_l2` are relative errors in physical units after undoing the train-set z-score.
 
-| Experiment | Entry point |
+| Experiment | Command |
 |---|---|
-| Helmholtz | `train_helmholtz.py [--dataset sigma_*_rho_*] [--model {AMOR,FNO,PCANet}]` |
-| Nonlinear diffusion | `train_nonlinear_diffusion.py [--dataset fvar_*] [--model {AMOR,FNO,PCANet}]` |
-| Kolmogorov | `train_kolmogorov.py --re {40,500,5000} [--models ...]` |
-| Basis ablations (wrappers) | `train_amor_{helmholtz,kolmogorov_Re40,nonlinear_diffusion,aircraft_rib}_basis.py --basis_type ...`; DIS: `fit_*_dis_basis.py` |
-| Elastostatics accuracy | `train_elastostatics_single.py --model {FNO,AMOR}` |
-| Elastostatics timing (`fig:scaling`, SI) | `bench_elastostatics_timing_scaling.py` (recon-matched \(k\)); `bench_elastostatics_independent_timing.py` (\(k_{\mathrm{in}}=k_{\mathrm{out}}\)) |
-| FlowBench LDC 3D | `train_flowbench_ldc3d_single.py --model {FNO,AMOR}` |
-| Aircraft rib tip (mass-PCA) | `train_amor_aircraft_rib_linear_mass.py` (or launcher `train_amor_aircraft_rib_easy_10000_best_mass.py`) |
-| Rib tip basis ablation | `train_amor_aircraft_rib_basis.py --basis_type ...` |
-| Rib bcfield / mixed | `fit_aircraft_rib_bcfield_pca.py` + `train_amor_aircraft_rib_bcfield.py` |
-| Mesh generalization | `mesh_generalization/run_mesh_generalization.py` |
-| Data efficiency | `data_efficiency/train_*.py` |
+| Helmholtz (all priors × models) | `python AMOR/scripts/train_helmholtz.py` |
+| Helmholtz (one cell) | `python AMOR/scripts/train_helmholtz.py --dataset sigma_0.2_rho_0.4 --model AMOR` |
+| Nonlinear diffusion | `python AMOR/scripts/train_nonlinear_diffusion.py [--dataset …] [--model …]` |
+| Kolmogorov | `python AMOR/scripts/train_kolmogorov.py --re {40,500,5000} [--models AMOR]` |
+| Basis ablations (2D) | `python AMOR/scripts/train_amor_{helmholtz,kolmogorov_Re40,nonlinear_diffusion}_basis.py --basis_type …` |
+| DIS bases | `python AMOR/scripts/fit_{helmholtz,nonlinear_diffusion}_dis_basis.py` |
+| Elastostatics accuracy | `python AMOR/scripts/train_elastostatics_single.py --model AMOR` |
+| Elastostatics timing | `python AMOR/scripts/bench_elastostatics_timing_scaling.py` |
+| FlowBench LDC 3D | `python AMOR/scripts/train_flowbench_ldc3d_single.py --model AMOR` |
+| Aircraft rib tip (mass-PCA) | `python AMOR/scripts/train_amor_aircraft_rib.py` |
+| Rib tip basis sweep | `python AMOR/scripts/train_amor_aircraft_rib.py --basis_type learned_qr` |
+| Rib bcfield / mixed | `python AMOR/scripts/fit_aircraft_rib_bcfield_pca.py --data_path …` then `train_amor_aircraft_rib.py --dataset bcfield --data_path … --checkpoint_dir … --pca_npz …` |
+| Mesh generalization | `python AMOR/mesh_generalization/run_mesh_generalization.py` |
+| Data efficiency | `python AMOR/data_efficiency/train_*.py` |
 
-`train_kolmogorov.py` keeps the per-Reynolds settings of the published runs in
-`RE_DEFAULTS` (width, depth, and the SVD solver used for the PCA fit), so
-`--re 500` reproduces the Re=500 configuration rather than a shared default.
-Every value can be overridden on the command line. The `*_basis.py` scripts are
-thin wrappers over those trainers; they stay separate so each ablation keeps its
-own checkpoint layout.
+`train_kolmogorov.py` stores the published per-Reynolds width, depth, and PCA SVD solver in `RE_DEFAULTS`. Rib tip defaults enable coordinates and FiLM (paper tip protocol); pass `--no_coordinates` / `--no_film_conditioning` only if you intentionally disable them.
 
-Aircraft-rib tip training is still four entry points (mass tip, basis sweep,
-bcfield, tip launcher). They are not yet folded into one `--dataset`/`--pca`
-trainer; see the rib provenance note before changing defaults.
+### Aircraft-rib mass weighting
 
-Metrics `test_rel_l1` / `test_rel_l2` are relative errors in physical units after undoing train-set z-score.
+`--dataset cantilever_tip` builds a lumped nodal mass from `nodes` / `elements`, fits `PCAReducerMultiChannelMass` (PCA in the M-weighted inner product), and encodes with `(x-μ)⊙m` against those modes. `--dataset bcfield` uses Euclidean `PCAReducerMultiChannel` from a precomputed `--pca_npz` bundle (no mass matrix).
+
+## Recreate datasets
+
+Prefer the Zenodo deposit above. Generators under `AMOR/data/` rebuild the same files:
+
+```bash
+# Nonlinear diffusion (paper priors)
+python AMOR/data/generate_nonlinear_diffusion.py --preset medium
+python AMOR/data/generate_nonlinear_diffusion.py --preset smooth
+python AMOR/data/generate_nonlinear_diffusion.py --preset rough
+
+# Helmholtz (needs hippylib / hippyflow)
+python AMOR/data/generate_helmholtz.py --preset ultrasmooth   # sigma=0.1, rho=0.6
+python AMOR/data/generate_helmholtz.py --preset smooth        # sigma=0.2, rho=0.4
+python AMOR/data/generate_helmholtz.py --preset standard      # sigma=0.4, rho=0.2
+
+# 3D elastostatics
+python AMOR/data/3D_elastostatics.py --help
+
+# Aircraft rib (STEP is not redistributed; cite the paper and place a local copy)
+# See AMOR/data/aircraft_rib/README.md
+```
 
 ## Apply AMOR to a new problem
 
-1. Represent fields as tensors (grid or nodal).
-2. Fit a reducer on the **train** split only: `PCAReducerMultiChannel` for 2D
-   grids, `PCAReducerVolume` for 3D grids, `PCAReducerMultiChannelMass` for FEM
-   meshes with a lumped nodal mass matrix. Bases are fitted outside the model
-   and passed in, so any basis exposing the same interface works.
-3. Instantiate `AMOR` (`AMOR/models/amor.py`). One class covers all published
-   variants; the spatial dimension, channel counts and mode counts follow the
-   reducer you pass as `rb`. Mass weighting (`mass=True`), FiLM conditioning
-   (`use_film_conditioning=True`), coordinate embedding, and trainable bases
-   (`trainable_basis` with `qr` or `cayley`) are constructor options.
-   `AMOR_conditioned.py` keeps `AMORWithFieldInputs` / `AMORWithLoadFiLM` as
-   aliases for code written against the earlier class names.
-4. Train with the closest paper script’s schedule (typically AdamW \(2\cdot10^{-3}\), weight decay \(10^{-4}\), grad clip \(3\), cosine annealing, relative \(L^1\)). The loops in `AMOR/training/` are reusable: `loop2d.py` for field-to-field 2D problems, `loop3d.py` for 3D, `loop_timestep.py` for Euler-step time stepping.
+One class: `from AMOR.models.amor import AMOR`.
+
+1. Store fields as `(S, C, *spatial)` arrays (grid) or `(S, C, N, 1)` nodal fields.
+2. Fit a reducer on the **train** split only:
+   - grids 2D: `PCAReducerMultiChannel`
+   - grids 3D: `PCAReducerVolume`
+   - FEM mesh with lumped mass: `PCAReducerMultiChannelMass` (pass `mass_nodes`)
+3. Build the model. Dimension, channel counts, and mode counts follow `rb`:
+
+```python
+import numpy as np
+import torch
+from AMOR.models.amor import AMOR
+from AMOR.models.PCAReducer import PCAReducerMultiChannel
+
+# Synthetic field-to-field map: (S, 1, 32, 32) -> (S, 1, 32, 32)
+rng = np.random.default_rng(0)
+x = rng.standard_normal((200, 1, 32, 32), dtype=np.float32)
+y = np.sin(x)
+
+rb = PCAReducerMultiChannel(random_state=0).fit(
+    x[:140], y[:140], n_components_in=64, n_components_out=64
+)
+model = AMOR(
+    width=16,
+    rb=rb,
+    k_in=64,
+    k_out=64,
+    layers=4,
+    use_coordinates=False,
+    use_film_conditioning=False,  # if True, forward(x, film_cond)
+    trainable_basis=False,        # or True with trainable_basis_param="qr"|"cayley"
+)
+pred = model(torch.from_numpy(x[:8]))
+assert pred.shape == (8, 1, 32, 32)
+```
+
+For a mass-weighted mesh problem, fit `PCAReducerMultiChannelMass` and call `AMOR(..., mass=True)` (or rely on the reducer: mass is inferred when `rb` exposes `encoder_mass_diag`). For FiLM, pass `use_film_conditioning=True` and `model(x, film_cond)`.
+
+Training schedules in the paper scripts are AdamW \(2\cdot10^{-3}\), weight decay \(10^{-4}\), grad clip \(3\), cosine annealing, relative \(L^1\). Reusable loops: `AMOR/training/loop2d.py` (field-to-field 2D), `loop3d.py` (3D), `loop_timestep.py` (Euler step).
 
 ## Citation
 
-Cite the AMOR paper and this software. Cite Zenodo / third-party data records when using those datasets.
+Cite the AMOR paper, this software, and the datasets you use.
 
 ```bibtex
 @software{voderholzer2026amor,
@@ -102,12 +169,12 @@ Cite the AMOR paper and this software. Cite Zenodo / third-party data records wh
 }
 ```
 
+**AMOR-generated datasets** (nonlinear diffusion, Helmholtz, elastostatics, aircraft rib, …) — [Zenodo upload 18815516](https://zenodo.org/uploads/18815516).
+
 **Kolmogorov** — Li et al., ICLR 2021; Zenodo DOI [10.5281/zenodo.7495555](https://doi.org/10.5281/zenodo.7495555).
 
 **Helmholtz generation** — hippyflow / hippylib.
 
 **FlowBench** — Tali et al., arXiv:2409.18032.
-
-**AMOR-generated datasets (nonlinear, elastostatics, rib, …)** — Zenodo release accompanying the paper.
 
 See `LICENSE` (placeholder until the final license text is added).

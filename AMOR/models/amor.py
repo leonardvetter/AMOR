@@ -257,7 +257,6 @@ class ReducedBasisBlock(nn.Module):
 
         # Zahm option-2: parent AMOR whitens with C^{-1/2} before lift; blocks use
         # Euclidean encode on ψ. Do NOT apply C^{-1} after lift (prior is on the field).
-        self._use_prior_cov_encode = False
         if self.mass:
             prior_cov = getattr(rb, "prior_cov_", None)
             self._euclidean_after_whiten = bool(
@@ -352,24 +351,15 @@ class ReducedBasisBlock(nn.Module):
         dec_components: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Append normalized constant vector to basis.
-        
-        This helps preserve mean values through the transformation,
-        analogous to the DC component in Fourier representations.
+        Append the Euclidean unit-norm constant mode
+        e_1 = n^{-1/2} 1 to the encoder and decoder bases.
         """
-        # Mass blocks scale by the spatial size only; Euclidean blocks by the full
-        # flattened encoder width (which includes the channel count).
-        if self.mass:
-            const_scale = 1.0 / self.spatial_size
-        else:
-            const_scale = 1.0 / max(enc_components.shape[1], 1)
-        
-        enc_const = np.ones((1, enc_components.shape[1]), dtype=np.float32) * const_scale
+        enc_n = max(int(enc_components.shape[1]), 1)
+        dec_n = max(int(dec_components.shape[1]), 1)
+        enc_const = np.full((1, enc_n), 1.0 / np.sqrt(enc_n), dtype=np.float32)
+        dec_const = np.full((1, dec_n), 1.0 / np.sqrt(dec_n), dtype=np.float32)
         enc_components = np.concatenate([enc_components, enc_const], axis=0)
-        
-        dec_const = np.ones((1, dec_components.shape[1]), dtype=np.float32) * const_scale
         dec_components = np.concatenate([dec_components, dec_const], axis=0)
-        
         return enc_components, dec_components
 
     def _init_transformation_weights(self) -> None:
@@ -450,16 +440,6 @@ class ReducedBasisBlock(nn.Module):
         if self.trainable_basis:
             basis = self.shared_enc_basis if self.use_input_basis_for_encoder else self.shared_dec_basis
             z_flat = basis.encode(x_flat, D)
-        elif getattr(self, "_use_prior_cov_encode", False):
-            # z = Φ^T C^{-1} (x - μ) via Woodbury
-            mu = self.cov_mean[:D]
-            x_c = x_flat - mu.unsqueeze(0)
-            eps = self.cov_jitter
-            V = self.cov_V[:D, :]
-            coef = x_c @ V
-            scale = self.cov_lam / (eps * (eps + self.cov_lam))
-            y = x_c / eps - (coef * scale.unsqueeze(0)) @ V.T
-            z_flat = y @ self.enc_components_t[:D, :]
         elif self.use_shared_fixed_basis:
             # Shared global basis (k, D); encode = (x - mean) @ components^T on-device.
             h = self._shared_fixed_basis
@@ -1128,7 +1108,6 @@ class AMOR(nn.Module):
 
 # =============================================================================
 # Mass-weighted AMOR (rib meshes). Euclidean AMOR is above.
-# Import via mass/AMOR_mass.py shim for historical names (AMOR, ReducedBasisBlock).
 # =============================================================================
 
 def make_learnable_basis_mass(

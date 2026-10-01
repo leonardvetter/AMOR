@@ -10,7 +10,7 @@ import numpy as np
 def split_indices(
     n: int, seed: int = 42, train_frac: float = 0.7, val_frac: float = 0.2
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Same split as train_amor_aircraft_rib_bcfield.py (seed, 70/20/10)."""
+    """Same split as train_amor_aircraft_rib.py --dataset bcfield (seed, 70/20/10)."""
     rng = np.random.default_rng(seed)
     perm = rng.permutation(n)
     n_train = max(1, int(train_frac * n))

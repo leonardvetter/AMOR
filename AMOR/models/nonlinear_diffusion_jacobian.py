@@ -1,4 +1,4 @@
-"""Roseberry DIS Jacobian for generate_nonlinear_fvar_5_flen_0.2_mvar_1_mlen_0.3.py (FiPy Grid2D, D=exp(m))."""
+"""Roseberry DIS Jacobian for generate_nonlinear_diffusion.py --preset medium (FiPy Grid2D, D=exp(m))."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def _grad_m_fipy(
 
 
 class NonlinearDiffusionJacobian:
-    """J of FiPy map (f, m) -> u from generate_nonlinear_fvar_5_flen_0.2_mvar_1_mlen_0.3.py."""
+    """J of FiPy map (f, m) -> u from generate_nonlinear_diffusion.py --preset medium."""
 
     def __init__(self, n: int, L: float = 1.0, *, fd_eps: float = 1e-5):
         self.n = n

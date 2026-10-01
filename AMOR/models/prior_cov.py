@@ -44,9 +44,9 @@ class LowRankPriorCov:
     ) -> "LowRankPriorCov":
         """Fit C ≈ V diag(λ) Vᵀ + εI from samples.
 
-        Truncates SVD modes with λ < min_lam_over_jitter * ε so whitening /
-        C^{-1} are not polluted by noise-floor directions (critical when
-        requested rank ≫ effective prior rank, e.g. rib cov_rank=256).
+        Truncates SVD modes with λ < min_lam_over_jitter * ε so C^{1/2}
+        whitening is not polluted by noise-floor directions (critical when
+        requested rank ≫ effective prior rank).
         """
         X = np.asarray(X, dtype=np.float64)
         if X.ndim != 2:
@@ -103,50 +103,6 @@ class LowRankPriorCov:
         coef = self.V.T @ x
         scale = np.sqrt(self.lam + eps) - sqrt_eps
         return sqrt_eps * x + self.V @ (scale * coef)
-
-    def apply_inv_sqrt(self, x: np.ndarray) -> np.ndarray:
-        """Exact C^{-1/2} x for C = V Λ V^T + ε I.
-
-        C^{-1/2} = ε^{-1/2} I + V ((λ+ε)^{-1/2} - ε^{-1/2}) V^T
-        """
-        x = np.asarray(x, dtype=np.float64).reshape(-1)
-        if x.size != self.dim:
-            raise ValueError(f"dim {x.size} != {self.dim}")
-        eps = self.jitter
-        inv_sqrt_eps = 1.0 / math.sqrt(eps)
-        coef = self.V.T @ x
-        scale = 1.0 / np.sqrt(self.lam + eps) - inv_sqrt_eps
-        return inv_sqrt_eps * x + self.V @ (scale * coef)
-
-    def apply_inv(self, x: np.ndarray) -> np.ndarray:
-        """Exact (V Λ V^T + ε I)^{-1} via Woodbury."""
-        x = np.asarray(x, dtype=np.float64).reshape(-1)
-        if x.size != self.dim:
-            raise ValueError(f"dim {x.size} != {self.dim}")
-        eps = self.jitter
-        coef = self.V.T @ x
-        scale = self.lam / (eps * (eps + self.lam))
-        return x / eps - self.V @ (scale * coef)
-
-    def rows_to_physical(self, rows_w: np.ndarray) -> np.ndarray:
-        """ψ rows (Euclidean from SVD of C^{1/2}-whitened probes) → φ = C^{1/2} ψ."""
-        rows_w = np.asarray(rows_w, dtype=np.float64)
-        return np.stack([self.apply_sqrt(r) for r in rows_w], axis=0)
-
-    def encode(self, X: np.ndarray, Phi: np.ndarray) -> np.ndarray:
-        """z = Φ^T C^{-1} (x - mean); X (S,d), Phi (k,d) → (S,k)."""
-        Phi = np.asarray(Phi, dtype=np.float64)
-        Xc = np.asarray(X, dtype=np.float64) - self.mean
-        # (C^{-1} Xc^T)^T Φ^T ... z_s = Phi @ C^{-1} x_s  if Phi rows are φ_i
-        # z = (C^{-1} Xc) @ Phi.T  with C^{-1} applied row-wise
-        Y = np.stack([self.apply_inv(x) for x in Xc], axis=0)
-        return Y @ Phi.T
-
-    def gram_Cinv(self, Phi: np.ndarray) -> np.ndarray:
-        """Φ C^{-1} Φ^T should be ~I for C^{-1}-orthonormal rows."""
-        Phi = np.asarray(Phi, dtype=np.float64)
-        Y = np.stack([self.apply_inv(r) for r in Phi], axis=0)
-        return Phi @ Y.T
 
     def save_dict(self) -> dict:
         return {

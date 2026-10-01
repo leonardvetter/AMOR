@@ -225,7 +225,7 @@ def main() -> None:
         },
         "traction_rule": "uniform on easy neumann_tris: t = load_dir * (load / A_neumann)",
         "load_direction": "primary mesh axis (+1)",
-        "compatible_with": "train_amor_aircraft_rib_bcfield.py / build_field_tensors",
+        "compatible_with": "train_amor_aircraft_rib.py --dataset bcfield / build_field_tensors",
     }
     meta_path = Path(args.meta_json) if args.meta_json else out_path.with_suffix(".json")
     with open(meta_path, "w", encoding="utf-8") as f:

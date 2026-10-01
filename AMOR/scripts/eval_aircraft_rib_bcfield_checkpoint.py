@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-from AMOR.models.AMOR_field_inputs import AMORWithFieldInputs  # noqa: E402
+from AMOR.models.amor import AMOR  # noqa: E402
 from AMOR.models.PCAReducer import PCAReducerMultiChannel  # noqa: E402
 from AMOR.datasets.aircraft_rib import (  # noqa: E402
     build_field_tensors,
@@ -145,7 +145,7 @@ def main() -> None:
     k_out = int(ckpt.get("k_out", 2))
     width = int(ckpt.get("width", 24))
     layers = int(ckpt.get("layers", 4))
-    model = AMORWithFieldInputs(
+    model = AMOR(
         width=width,
         rb=rb,
         k_in=k_in,
