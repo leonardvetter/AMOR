@@ -57,10 +57,9 @@ TrainableOrthonormalBasis = QROrthonormalBasis
 class SharedFixedPCABasis(nn.Module):
     """One global copy of each fixed PCA basis (input/output), shared by all blocks.
 
-    Stores components as (k, D) plus the mean (D,). Encode uses ``components^T``,
-    decode uses ``components`` directly, so a single buffer serves both directions.
-    Replaces the per-block enc/dec buffers (3x k_in*D_in + 7x k_out*D_out) with a
-    single k_in*D_in + k_out*D_out, ~5x less GPU memory across the 5 blocks.
+    Stores decoder Φ as (k, D) plus mean (D,). When a dual encoder E is present
+    (``encoder_components_``), encode uses E and decode uses Φ; otherwise encode
+    and decode share Φ (Euclidean / M-adjoint handled outside).
     """
 
     def __init__(self, rb, k_in: int, k_out: int):
@@ -71,6 +70,20 @@ class SharedFixedPCABasis(nn.Module):
         self.register_buffer("in_mean", torch.from_numpy(rb.pca_in.mean_.astype(np.float32)))
         self.register_buffer("out_comp", torch.from_numpy(rb.pca_out.components_[:k_out].astype(np.float32)))
         self.register_buffer("out_mean", torch.from_numpy(rb.pca_out.mean_.astype(np.float32)))
+        enc_in = getattr(rb.pca_in, "encoder_components_", None)
+        enc_out = getattr(rb.pca_out, "encoder_components_", None)
+        if enc_in is not None:
+            self.register_buffer(
+                "in_enc", torch.from_numpy(np.asarray(enc_in[:k_in], dtype=np.float32))
+            )
+        else:
+            self.in_enc = None
+        if enc_out is not None:
+            self.register_buffer(
+                "out_enc", torch.from_numpy(np.asarray(enc_out[:k_out], dtype=np.float32))
+            )
+        else:
+            self.out_enc = None
 
 
 class ReducedBasisBlock(nn.Module):
@@ -122,7 +135,7 @@ class ReducedBasisBlock(nn.Module):
         use_input_basis_for_decoder: bool = False,
         use_batch_norm: bool = False,
         add_constant_mode: bool = False,
-        use_factorized_weights: bool = False,
+        use_factorized_weights="auto",
         use_factorized_weights_auto_threshold: int = 10000,
         shared_enc_basis: Optional[LearnableOrthonormalBasis] = None,
         shared_dec_basis: Optional[LearnableOrthonormalBasis] = None,
@@ -205,10 +218,18 @@ class ReducedBasisBlock(nn.Module):
             and not add_constant_mode
         )
 
+        object.__setattr__(self, "_has_dual_encoder", False)
         if self.use_shared_fixed_basis:
             # No per-block buffers; dims follow directly from k and basis choice.
             self.encoder_dim = self.k_in if use_input_basis_for_encoder else self.k_out
             self.decoder_dim = self.k_in if use_input_basis_for_decoder else self.k_out
+            # Shared path prefers E when registered on SharedFixedPCABasis.
+            h = shared_fixed_basis
+            has_e = (
+                (use_input_basis_for_encoder and getattr(h, "in_enc", None) is not None)
+                or ((not use_input_basis_for_encoder) and getattr(h, "out_enc", None) is not None)
+            )
+            object.__setattr__(self, "_has_dual_encoder", bool(has_e))
         else:
             # Setup PCA components for encoder and decoder
             enc_components, enc_mean = self._setup_encoder_components(rb)
@@ -242,32 +263,24 @@ class ReducedBasisBlock(nn.Module):
             if not self.use_input_basis_for_decoder and self.shared_dec_basis is None:
                 raise ValueError("trainable output decoder requires shared_dec_basis")
 
+        self._enc_mass_sp = None  # scipy.sparse CSR for general M (CPU encode path)
         if self.mass:
-            if not hasattr(rb, "encoder_mass_diag"):
-                raise ValueError("mass=True requires PCAReducerMultiChannelMass (M-weighted PCA)")
-            enc_mass = rb.encoder_mass_diag(
-                use_input_basis=self.use_input_basis_for_encoder, dim=self.input_dim
-            )
-            dec_mass = rb.encoder_mass_diag(
-                use_input_basis=self.use_input_basis_for_decoder, dim=self.output_dim
-            )
+            if not hasattr(rb, "mass_matrix"):
+                raise ValueError(
+                    "mass=True requires rb.mass_matrix() (consistent sparse P1); "
+                    "diagonal-only mass is not supported"
+                )
             if not self.trainable_basis:
-                self.register_buffer("enc_mass_diag", torch.from_numpy(enc_mass.astype(np.float32)))
-                self.register_buffer("dec_mass_diag", torch.from_numpy(dec_mass.astype(np.float32)))
+                M = rb.mass_matrix(use_input_basis=self.use_input_basis_for_encoder)
+                if M is None:
+                    raise RuntimeError("rb.mass_matrix() returned None")
+                object.__setattr__(self, "_enc_mass_sp", M)
+                # Row-sum buffer kept for diagnostics / legacy ckpt keys only.
+                enc_mass = np.asarray(M.sum(axis=1)).reshape(-1)
+                self.register_buffer(
+                    "enc_mass_diag", torch.from_numpy(enc_mass[: self.input_dim].astype(np.float32))
+                )
 
-        # Zahm option-2: parent AMOR whitens with C^{-1/2} before lift; blocks use
-        # Euclidean encode on ψ. Do NOT apply C^{-1} after lift (prior is on the field).
-        if self.mass:
-            prior_cov = getattr(rb, "prior_cov_", None)
-            self._euclidean_after_whiten = bool(
-                prior_cov is not None
-                and self.use_input_basis_for_encoder
-                and not self.trainable_basis
-            )
-            if hasattr(self, "enc_mass_diag") and self._euclidean_after_whiten:
-                # Override mass weights → ones so encode is Euclidean in whitened coords.
-                self.enc_mass_diag.fill_(1.0)
-        
         # Handle auto mode for factorized weights (now that dimensions are known)
         if self.use_factorized_weights == 'auto':
             should_use_factorized = (self.encoder_dim * self.decoder_dim) > self.use_factorized_weights_auto_threshold
@@ -291,58 +304,54 @@ class ReducedBasisBlock(nn.Module):
         return super().to(*args, **kwargs)
 
     def _validate_k_values(self, rb, k_in: int, k_out: int) -> None:
-        """Validate that k values are within valid ranges."""
+        """Validate k against the PCA side each encoder/decoder actually uses."""
         max_k_in = rb.pca_in.n_components_
         max_k_out = rb.pca_out.n_components_
-
-        if self.mass:
-            # Validate against the PCA basis each side actually uses.
-            enc_max = max_k_in if self.use_input_basis_for_encoder else max_k_out
-            dec_max = max_k_in if self.use_input_basis_for_decoder else max_k_out
-            if not (1 <= k_in <= enc_max):
-                raise ValueError(f"k_in={k_in} out of range [1, {enc_max}] for encoder basis")
-            if not (1 <= k_out <= dec_max):
-                raise ValueError(f"k_out={k_out} out of range [1, {dec_max}] for decoder basis")
-            return
-
-        if not (1 <= k_in <= max_k_in):
-            raise ValueError(f"k_in={k_in} out of range [1, {max_k_in}]")
-        if self.use_input_basis_for_decoder:
-            if not (1 <= k_out <= max_k_in):
-                raise ValueError(f"k_out={k_out} out of range [1, {max_k_in}] (input basis decoder)")
-        elif not (1 <= k_out <= max_k_out):
-            raise ValueError(f"k_out={k_out} out of range [1, {max_k_out}]")
+        enc_max = max_k_in if self.use_input_basis_for_encoder else max_k_out
+        dec_max = max_k_in if self.use_input_basis_for_decoder else max_k_out
+        if not (1 <= k_in <= enc_max):
+            raise ValueError(f"k_in={k_in} out of range [1, {enc_max}] for encoder basis")
+        if not (1 <= k_out <= dec_max):
+            raise ValueError(f"k_out={k_out} out of range [1, {dec_max}] for decoder basis")
 
     def _setup_encoder_components(self, rb) -> Tuple[np.ndarray, np.ndarray]:
-        """Extract and prepare encoder PCA components."""
+        """Encoder rows: prefer dual ``encoder_components_`` (DIS / mesh-transfer E).
+
+        When E is present, encode is z = E(x−μ) (never also multiply by M).
+        When mass=True and E is absent, store Φ and apply sparse M in ``encode``.
+        """
         if self.use_input_basis_for_encoder:
-            components = rb.pca_in.components_[:self.k_in, :].astype(np.float32)
-            mean = rb.pca_in.mean_.astype(np.float32)
+            pca = rb.pca_in
+            k = self.k_in
         else:
-            components = rb.pca_out.components_[:self.k_out, :].astype(np.float32)
-            mean = rb.pca_out.mean_.astype(np.float32)
-            
-            # Pad components if output dimension is smaller than encoder field dim
-            if components.shape[1] < self.input_dim:
-                padding = np.zeros(
-                    (components.shape[0], self.input_dim - components.shape[1]),
-                    dtype=np.float32
-                )
-                components = np.concatenate([components, padding], axis=1)
-            if mean.shape[0] < self.input_dim:
-                mean = np.pad(mean, (0, self.input_dim - mean.shape[0]), mode="constant")
-        
+            pca = rb.pca_out
+            k = self.k_out
+        enc = getattr(pca, "encoder_components_", None)
+        use_dual = enc is not None
+        object.__setattr__(self, "_has_dual_encoder", bool(use_dual))
+        if use_dual:
+            components = np.asarray(enc[:k], dtype=np.float32)
+        else:
+            components = np.asarray(pca.components_[:k], dtype=np.float32)
+        mean = np.asarray(pca.mean_, dtype=np.float32)
+        if components.shape[1] < self.input_dim:
+            padding = np.zeros(
+                (components.shape[0], self.input_dim - components.shape[1]),
+                dtype=np.float32,
+            )
+            components = np.concatenate([components, padding], axis=1)
+        if mean.shape[0] < self.input_dim:
+            mean = np.pad(mean, (0, self.input_dim - mean.shape[0]), mode="constant")
         return components, mean
 
     def _setup_decoder_components(self, rb) -> Tuple[np.ndarray, np.ndarray]:
-        """Extract and prepare decoder PCA components."""
+        """Decoder rows = physical modes Φ (``components_``)."""
         if self.use_input_basis_for_decoder:
             components = rb.pca_in.components_[:self.k_in, :].astype(np.float32)
             mean = rb.pca_in.mean_.astype(np.float32)
         else:
             components = rb.pca_out.components_[:self.k_out, :].astype(np.float32)
             mean = rb.pca_out.mean_.astype(np.float32)
-        
         return components, mean
 
     def _add_constant_mode(
@@ -441,14 +450,39 @@ class ReducedBasisBlock(nn.Module):
             basis = self.shared_enc_basis if self.use_input_basis_for_encoder else self.shared_dec_basis
             z_flat = basis.encode(x_flat, D)
         elif self.use_shared_fixed_basis:
-            # Shared global basis (k, D); encode = (x - mean) @ components^T on-device.
+            # Shared global basis (k, D); dual / M-adjoint E preferred when present.
             h = self._shared_fixed_basis
-            comp, mean = (h.in_comp, h.in_mean) if self.use_input_basis_for_encoder else (h.out_comp, h.out_mean)
-            z_flat = torch.matmul(x_flat - mean[:D].unsqueeze(0), comp[:, :D].transpose(0, 1))
+            if self.use_input_basis_for_encoder:
+                enc = h.in_enc if getattr(h, "in_enc", None) is not None else h.in_comp
+                mean = h.in_mean
+            else:
+                enc = h.out_enc if getattr(h, "out_enc", None) is not None else h.out_comp
+                mean = h.out_mean
+            z_flat = torch.matmul(x_flat - mean[:D].unsqueeze(0), enc[:, :D].transpose(0, 1))
+        elif getattr(self, "_has_dual_encoder", False):
+            # Dual / M-adjoint rows already bake the metric: z = E (x − μ).
+            enc = self.enc_components_t[:D, :]
+            enc_mean = self.enc_mean[:D]
+            z_flat = torch.matmul(x_flat - enc_mean.unsqueeze(0), enc)
         elif self.mass:
-            # M-weighted encode: z_j = <h - mu, phi_j>_M
+            # M-weighted encode: z = Φᵀ M (x − μ). Requires sparse mass_matrix
+            # (consistent P1); no diagonal-M assumption. Φ stored in enc_components.
             x_centered = x_flat - self.enc_mean[:D]
-            z_flat = (x_centered * self.enc_mass_diag[:D]) @ self.enc_components_t[:D, :]
+            enc = self.enc_components_t[:D, :]  # (D, k) = Φᵀ
+            M = getattr(self, "_enc_mass_sp", None)
+            if M is None:
+                raise RuntimeError(
+                    "mass=True encode requires sparse mass_matrix on the reducer "
+                    "(consistent P1); diagonal-only fallback removed"
+                )
+            xc = x_centered.detach().cpu().numpy()
+            if M.shape[0] != D or M.shape[1] != D:
+                M = M[:D, :D]
+            Mx = M @ xc.T  # (D, B)
+            z_np = (enc.detach().cpu().numpy().T @ Mx).T  # (B, k)
+            z_flat = torch.from_numpy(np.asarray(z_np, dtype=np.float32)).to(
+                device=x_flat.device, dtype=x_flat.dtype
+            )
         else:
             # On-device GEMM: bases move with the module (GPU when model on GPU).
             enc = self.enc_components_t[:D, :]
@@ -612,7 +646,11 @@ class AMOR(nn.Module):
         rb: Fitted PCAReducerMultiChannel containing input/output PCA bases
         k_in: Number of input PCA modes to retain
         k_out: Number of output PCA modes to retain
-        layers: Number of reduced basis blocks (excluding transition blocks)
+        layers: Total number of nonlocal blocks, including the input→output
+            transition. Requires ``layers >= 2``: block0 (input→input), block1
+            (transition), then ``layers - 2`` output→output residual blocks.
+            ``uniform_basis_blocks=True`` builds exactly ``layers`` blocks on the
+            output basis and omits the transition.
         dropout: Dropout probability for regularization
         init_scale: Initial value for scalar gates
         use_skip_connections: If True, add residual connections within blocks
@@ -653,15 +691,15 @@ class AMOR(nn.Module):
         dropout: float = 0.0,
         init_scale: float = 0.1,
         use_skip_connections: bool = True,
-        use_batch_norm: bool = True,
+        use_batch_norm: bool = False,
         use_coordinates: bool = False,
         add_constant_mode: bool = False,
-        use_factorized_weights: bool = False,
+        use_factorized_weights="auto",
         use_factorized_weights_auto_threshold: int = 10000,
         trainable_basis: bool = False,
         trainable_basis_param: str = "qr",
         uniform_basis_blocks: bool = False,
-        share_bases: bool = False,
+        share_bases: bool = True,
         mass: Optional[bool] = None,
         use_film_conditioning: bool = False,
         film_hidden: int = 64,
@@ -678,11 +716,11 @@ class AMOR(nn.Module):
         if uniform_basis_blocks and trainable_basis:
             raise ValueError("uniform_basis_blocks not implemented with trainable_basis")
 
-        # M-weighted encode when the reducer carries a mass matrix (FEM meshes);
+        # M-weighted encode when the reducer carries a sparse mass matrix (FEM);
         # pass mass explicitly to override the reducer-based default.
-        self.mass = bool(hasattr(rb, "encoder_mass_diag")) if mass is None else bool(mass)
-        if self.mass and not hasattr(rb, "encoder_mass_diag"):
-            raise ValueError("mass=True requires PCAReducerMultiChannelMass (M-weighted PCA)")
+        self.mass = bool(hasattr(rb, "mass_matrix")) if mass is None else bool(mass)
+        if self.mass and not hasattr(rb, "mass_matrix"):
+            raise ValueError("mass=True requires PCAReducerMultiChannelMass (sparse M)")
 
         # Store dimensions
         self.spatial_shape, self.spatial_size, self.spatial_ndim = _rb_spatial_metadata(rb)
@@ -710,6 +748,8 @@ class AMOR(nn.Module):
             basis_dim_out = self.spatial_size if self.spatial_field else self.D_out
             enc_mass = rb.encoder_mass_diag(use_input_basis=True, dim=basis_dim_in) if self.mass else None
             dec_mass = rb.encoder_mass_diag(use_input_basis=False, dim=basis_dim_out) if self.mass else None
+            enc_M = rb.mass_matrix(use_input_basis=True) if self.mass and hasattr(rb, "mass_matrix") else None
+            dec_M = rb.mass_matrix(use_input_basis=False) if self.mass and hasattr(rb, "mass_matrix") else None
             shared_enc_basis = make_learnable_basis(
                 trainable_basis_param,
                 basis_dim_in,
@@ -717,6 +757,7 @@ class AMOR(nn.Module):
                 enc_init,
                 rb.pca_in.mean_.astype(np.float32),
                 enc_mass,
+                mass_matrix=enc_M,
             )
             shared_dec_basis = make_learnable_basis(
                 trainable_basis_param,
@@ -725,6 +766,7 @@ class AMOR(nn.Module):
                 dec_init,
                 rb.pca_out.mean_.astype(np.float32),
                 dec_mass,
+                mass_matrix=dec_M,
             )
             # The blocks own these modules; the top-level reference only reproduces
             # the Euclidean checkpoint layout, which also stores them at model level.
@@ -732,36 +774,26 @@ class AMOR(nn.Module):
                 self.shared_enc_basis = shared_enc_basis
                 self.shared_dec_basis = shared_dec_basis
 
-        # Single shared copy of the fixed PCA bases (owned by the parent, referenced
-        # by every block) — ~5x less GPU memory than per-block buffers.
+        # Single shared copy of the fixed PCA/DIS bases (owned by the parent,
+        # referenced by every block including the transition) — avoids O(L)
+        # duplicated buffers. Default on for fixed bases; off when trainable.
         self.shared_fixed_basis = None
-        if (
-            share_bases
-            and not trainable_basis
-            and not add_constant_mode
-        ):
+        if share_bases and not trainable_basis and not add_constant_mode:
             self.shared_fixed_basis = SharedFixedPCABasis(rb, k_in, k_out)
         self.share_bases = bool(self.shared_fixed_basis is not None)
 
-        # Zahm option-2: whiten input with C^{-1/2} before lift so Euclidean ψ-encode
-        # realizes z = ψ^T C^{-1/2}(x-μ) = φ^T C^{-1}(x-μ).
-        prior_cov = getattr(rb, "prior_cov_", None)
-        self._whiten_input = prior_cov is not None and not trainable_basis
-        if self._whiten_input:
-            self.register_buffer("cov_V", torch.from_numpy(np.asarray(prior_cov.V, dtype=np.float32)))
-            self.register_buffer("cov_lam", torch.from_numpy(np.asarray(prior_cov.lam, dtype=np.float32)))
-            self.register_buffer(
-                "cov_jitter",
-                torch.tensor(float(prior_cov.jitter), dtype=torch.float32),
-            )
-            self.register_buffer(
-                "cov_mean",
-                torch.from_numpy(np.asarray(prior_cov.mean, dtype=np.float32).reshape(-1)),
-            )
+        # Dual-encoder DIS stores E / Φ on the reducer; no input whitening.
+        self._whiten_input = False
 
         # Store configuration
         self.width = width
+        self.k_in = int(k_in)
+        self.k_out = int(k_out)
         self.num_layers = layers
+        # Alias spatial dims for mesh-generalization callers (model.N / model.M).
+        if self.spatial_ndim >= 2:
+            self.N = int(self.spatial_shape[0])
+            self.M = int(self.spatial_shape[1])
         self.use_skip_connections = use_skip_connections
         self.use_batch_norm = use_batch_norm
         self.use_coordinates = use_coordinates
@@ -839,6 +871,10 @@ class AMOR(nn.Module):
                 )
                 self.gates.append(ScalarGate(init=init_scale))
         else:
+            if layers < 2:
+                raise ValueError(
+                    f"layers must be >= 2 (total nonlocal blocks including transition), got {layers}"
+                )
             # Block 0: Input basis -> Input basis
             self.block0 = ReducedBasisBlock(
                 width=width,
@@ -851,7 +887,7 @@ class AMOR(nn.Module):
             )
             self.gate0 = ScalarGate(init=init_scale)
 
-            # Block 1: Input basis -> Output basis (transition)
+            # Block 1: Input basis -> Output basis (transition; counted in ``layers``)
             self.block1 = ReducedBasisBlock(
                 width=width,
                 rb=rb,
@@ -867,7 +903,7 @@ class AMOR(nn.Module):
             self.blocks = nn.ModuleList()
             self.gates = nn.ModuleList()
 
-            for _ in range(max(0, layers - 1)):
+            for _ in range(layers - 2):
                 self.blocks.append(
                     ReducedBasisBlock(
                         width=width,
@@ -936,19 +972,6 @@ class AMOR(nn.Module):
         
         return torch.cat([xs, ys], dim=1)
 
-    def _whiten_flat(self, x_flat: torch.Tensor) -> torch.Tensor:
-        """x_w = C^{-1/2}(x - μ) for Zahm option-2."""
-        if not getattr(self, "_whiten_input", False):
-            return x_flat
-        mu = self.cov_mean
-        eps = self.cov_jitter
-        V = self.cov_V
-        x_c = x_flat - mu.unsqueeze(0)
-        inv_sqrt_eps = torch.rsqrt(eps)
-        coef = x_c @ V
-        scale = torch.rsqrt(self.cov_lam + eps) - inv_sqrt_eps
-        return inv_sqrt_eps * x_c + (coef * scale.unsqueeze(0)) @ V.T
-
     def _apply_global_skip(self, x: torch.Tensor) -> torch.Tensor:
         if self._native_grid_forward:
             b = x.shape[0]
@@ -977,7 +1000,7 @@ class AMOR(nn.Module):
                 f"use_coordinates not supported for native {self.spatial_ndim}D grids"
             )
         global_skip = self._apply_global_skip(x)
-        x_flat = self._whiten_flat(x.reshape(b, self.D_in))
+        x_flat = x.reshape(b, self.D_in)
         if self.spatial_field:
             xw = x_flat.reshape(b, self.C_in, *self.spatial_shape)
             h = self.lift(xw)
@@ -1031,7 +1054,7 @@ class AMOR(nn.Module):
         # Compute global skip connection (before lifting)
         global_skip = self._apply_global_skip(x)
 
-        x_flat = self._whiten_flat(x.reshape(B, self.D_in))
+        x_flat = x.reshape(B, self.D_in)
         if self.spatial_field:
             if is_irregular:
                 xw = x_flat.reshape(B, self.C_in, n)
@@ -1092,6 +1115,11 @@ class AMOR(nn.Module):
     def count_parameters(self) -> int:
         """Return total number of trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def n_nonlocal_blocks(self) -> int:
+        """Instantiated nonlocal blocks, including the input→output transition."""
+        n = int(self.block0 is not None) + int(self.block1 is not None)
+        return n + len(self.blocks)
 
     def __repr__(self) -> str:
         """Return string representation with key hyperparameters."""

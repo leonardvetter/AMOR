@@ -658,11 +658,14 @@ class _MassPCAView:
         components_: np.ndarray,
         n_components_: int,
         explained_variance_ratio_: np.ndarray,
+        encoder_components_: Optional[np.ndarray] = None,
     ):
         self.mean_ = mean_
         self.components_ = components_
         self.n_components_ = n_components_
         self.explained_variance_ratio_ = explained_variance_ratio_
+        # Optional dual encoder rows E (k, D); default encode uses Φᵀ M via mass path.
+        self.encoder_components_ = encoder_components_
 
 
 class PCAReducerMultiChannelMass:
@@ -684,48 +687,68 @@ class PCAReducerMultiChannelMass:
         self.mass_diag_in_: Optional[np.ndarray] = None
         self.mass_diag_out_: Optional[np.ndarray] = None
         self.mass_nodes_: Optional[np.ndarray] = None
+        self.mass_in_ = None  # scipy.sparse CSR (full stacked), or None
+        self.mass_out_ = None
 
     @staticmethod
-    def _fit_mass_pca(
+    def _fit_mass_pca_sparse(
         X: np.ndarray,
-        mass_flat: np.ndarray,
+        M,
         *,
         n_components: int,
-        svd_solver: str,
-        whiten: bool,
-        random_state: Optional[int],
     ) -> _MassPCAView:
+        """Snapshot POD in the M-inner product (M any SPD sparse/dense, not assumed diag)."""
+        from .mass.mesh_mass import apply_mass
+
         n_s, n_f = X.shape
         k = int(min(n_components, n_s, n_f))
         if k < 1:
             raise ValueError(f"n_components={n_components} invalid for data shape {X.shape}")
         mu = X.mean(axis=0)
-        Xc = X - mu
-        sqrt_w = np.sqrt(np.maximum(mass_flat, 1e-30))
-        Xw = Xc * sqrt_w
-        pca = PCA(
-            n_components=k,
-            svd_solver=svd_solver,
-            whiten=whiten,
-            random_state=random_state,
-        ).fit(Xw)
-        components = pca.components_ / sqrt_w[np.newaxis, :]
+        Xc = np.asarray(X - mu, dtype=np.float64)
+        Y = apply_mass(M, Xc)  # (n_s, d), rows = (M x_i)^T
+        # G_ij = x_i^T M x_j
+        G = Xc @ Y.T
+        G = 0.5 * (G + G.T)
+        evals, evecs = np.linalg.eigh(G)
+        idx = np.argsort(evals)[::-1][:k]
+        lam = np.maximum(evals[idx], 1e-30)
+        U = evecs[:, idx]
+        # Φ = Xc^T U / sqrt(λ) ⇒ Φ^T M Φ = I (not M Xc^T U — that would bake M twice).
+        Phi = (Xc.T @ U) / np.sqrt(lam)[None, :]
+        components = Phi.T.astype(np.float32)
+        evr = (lam / max(float(lam.sum()), 1e-30)).astype(np.float32)
         return _MassPCAView(
             mean_=mu.astype(np.float32),
-            components_=components.astype(np.float32),
+            components_=components,
             n_components_=int(components.shape[0]),
-            explained_variance_ratio_=pca.explained_variance_ratio_.astype(np.float32),
+            explained_variance_ratio_=evr,
         )
 
     def fit(
         self,
         samples: np.ndarray,
         solution: np.ndarray,
-        mass_nodes: np.ndarray,
+        mass_nodes: np.ndarray = None,
         *,
         k_in: int,
         k_out: int,
+        mass_matrix=None,
+        nodes: np.ndarray = None,
+        elements: np.ndarray = None,
     ) -> "PCAReducerMultiChannelMass":
+        """Fit M-PCA with consistent sparse P1 mass (no diagonal-M assumption).
+
+        Provide ``mass_matrix`` (CSR) or ``nodes``+``elements`` to assemble it.
+        ``mass_nodes`` is ignored (legacy kwarg kept for call-site compat).
+        """
+        import scipy.sparse as sp
+        from .mass.mesh_mass import (
+            apply_mass,
+            consistent_nodal_mass,
+            mass_kron_channels,
+        )
+
         if samples.ndim != 4:
             raise ValueError(f"Expected (num_samples, C_in, N, M), got {samples.shape}")
         num_samples, c_in, n, m = samples.shape
@@ -744,41 +767,56 @@ class PCAReducerMultiChannelMass:
         self.output_shape_ = (c_out, n, m)
         y_out = solution.reshape(num_samples, -1).astype(np.float64, copy=False)
 
-        mass_nodes = np.asarray(mass_nodes, dtype=np.float64).reshape(-1)
-        if mass_nodes.size != n * m:
-            raise ValueError(f"mass_nodes size {mass_nodes.size} != N*M={n * m}")
+        n_nodes = n * m
+        if mass_matrix is not None:
+            M_nodes = sp.csr_matrix(mass_matrix, dtype=np.float64)
+            if M_nodes.shape != (n_nodes, n_nodes):
+                raise ValueError(f"mass_matrix shape {M_nodes.shape} != {(n_nodes, n_nodes)}")
+        elif nodes is not None and elements is not None:
+            M_nodes = consistent_nodal_mass(nodes, elements)
+            if M_nodes.shape[0] != n_nodes:
+                raise ValueError("consistent mass size != N*M")
+        else:
+            raise ValueError(
+                "fit requires mass_matrix or nodes+elements "
+                "(consistent P1; lumped mass_nodes fallback removed)"
+            )
+        _ = mass_nodes  # legacy unused
 
-        self.mass_nodes_ = mass_nodes.astype(np.float32)
-        w_in = mass_diag_stacked(mass_nodes, c_in, n, m)
-        w_out = mass_diag_stacked(mass_nodes, c_out, n, m)
-        self.mass_diag_in_ = w_in.astype(np.float32)
-        self.mass_diag_out_ = w_out.astype(np.float32)
+        self.mass_nodes_ = np.asarray(M_nodes.diagonal(), dtype=np.float32)
+        self.mass_in_ = mass_kron_channels(M_nodes, c_in)
+        self.mass_out_ = mass_kron_channels(M_nodes, c_out)
+        # Legacy diag buffers (row sums) for callers that still read them.
+        self.mass_diag_in_ = np.asarray(self.mass_in_.sum(axis=1)).reshape(-1).astype(np.float32)
+        self.mass_diag_out_ = np.asarray(self.mass_out_.sum(axis=1)).reshape(-1).astype(np.float32)
 
-        self.pca_in = self._fit_mass_pca(
-            x_in,
-            w_in,
-            n_components=int(k_in),
-            svd_solver=self.svd_solver,
-            whiten=self.whiten,
-            random_state=self.random_state,
-        )
-        self.pca_out = self._fit_mass_pca(
-            y_out,
-            w_out,
-            n_components=int(k_out),
-            svd_solver=self.svd_solver,
-            whiten=self.whiten,
-            random_state=self.random_state,
-        )
+        self.pca_in = self._fit_mass_pca_sparse(x_in, self.mass_in_, n_components=int(k_in))
+        self.pca_out = self._fit_mass_pca_sparse(y_out, self.mass_out_, n_components=int(k_out))
+        # M-adjoint encoders so share_bases / dual encode match z = Φᵀ M (x−μ).
+        from .dis_dual import m_adjoint_encoder_rows
+
+        self.pca_in.encoder_components_ = m_adjoint_encoder_rows(
+            self.pca_in.components_, self.mass_in_
+        ).astype(np.float32)
+        self.pca_out.encoder_components_ = m_adjoint_encoder_rows(
+            self.pca_out.components_, self.mass_out_
+        ).astype(np.float32)
         return self
 
     def encoder_mass_diag(self, *, use_input_basis: bool, dim: int) -> np.ndarray:
+        """Deprecated name: returns row-sum lumping of M (compat). Prefer ``mass_matrix``."""
         if self.mass_diag_in_ is None:
             raise ValueError("PCAReducerMultiChannelMass not fitted")
         base = self.mass_diag_in_ if use_input_basis else self.mass_diag_out_
         if base.shape[0] < dim:
             return np.pad(base, (0, dim - base.shape[0]), constant_values=1.0)
         return base[:dim]
+
+    def mass_matrix(self, *, use_input_basis: bool):
+        M = self.mass_in_ if use_input_basis else self.mass_out_
+        if M is None:
+            raise ValueError("PCAReducerMultiChannelMass has no sparse mass_matrix")
+        return M
 
     @staticmethod
     def _k_from_cutoff(evr: np.ndarray, cutoff: float) -> int:
@@ -807,16 +845,24 @@ class PCAReducerMultiChannelMass:
 def pca_like_from_rows_mass(
     mean: np.ndarray,
     rows: np.ndarray,
-    mass_flat: np.ndarray,
+    mass_flat_or_matrix,
     n_samples: int,
 ) -> _MassPCAView:
-    """Build mass-PCA view from mean + row basis (DIS / mesh alternative bases)."""
+    """Build mass-PCA view from mean + row basis (DIS / mesh alternative bases).
+
+    ``mass_flat_or_matrix`` may be a sparse/dense SPD mass matrix or a 1-d
+    lumped diagonal (stored as sparse diag). Modes are M-orthonormalized via
+    the Gram ``Φ M Φᵀ`` — no diagonal-M assumption in the orthonormalization.
+    """
+    import scipy.sparse as sp
+    from .dis_dual import m_orthonormalize_rows_general
+
     mean = np.asarray(mean, dtype=np.float64)
     rows = np.asarray(rows, dtype=np.float64)
-    sqrt_w = np.sqrt(np.maximum(np.asarray(mass_flat, dtype=np.float64), 1e-30))
-    rows_w = rows * sqrt_w[np.newaxis, :]
-    q, _ = np.linalg.qr(rows_w.T, mode="reduced")
-    components = (q.T / sqrt_w[np.newaxis, :]).astype(np.float32)
+    M = mass_flat_or_matrix
+    if not sp.issparse(M) and np.ndim(M) == 1:
+        M = sp.diags(np.asarray(M, dtype=np.float64).reshape(-1), format="csr")
+    components = m_orthonormalize_rows_general(rows, M).astype(np.float32)
     n_comp = int(components.shape[0])
     evr = np.ones(n_comp, dtype=np.float32) / max(1, n_comp)
     return _MassPCAView(
@@ -830,14 +876,18 @@ def pca_like_from_rows_mass(
 def fit_random_init_basis_mass(
     samples: np.ndarray,
     solution: np.ndarray,
-    mass_nodes: np.ndarray,
+    mass_nodes: np.ndarray = None,
     *,
     random_state=None,
     n_components_in: int | None = None,
     n_components_out: int | None = None,
+    nodes: np.ndarray = None,
+    elements: np.ndarray = None,
+    mass_matrix=None,
 ) -> PCAReducerMultiChannelMass:
-    """Random mass-orthonormal init for trainable AMOR bases on rib meshes."""
-    # _flatten_samples / _random_orthonormal_rows defined above in this module
+    """Random M-orthonormal init for trainable AMOR bases on rib meshes."""
+    import scipy.sparse as sp
+    from .mass.mesh_mass import consistent_nodal_mass, mass_kron_channels
 
     x_in, num_samples, c_in, n, m = _flatten_samples(samples)
     if solution.ndim == 3:
@@ -847,23 +897,36 @@ def fit_random_init_basis_mass(
         raise ValueError("Input/output spatial dims must match")
     y_out = solution.reshape(num_samples, -1).astype(np.float32, copy=False)
 
+    n_nodes = n * m
+    if mass_matrix is not None:
+        M_nodes = sp.csr_matrix(mass_matrix, dtype=np.float64)
+    elif nodes is not None and elements is not None:
+        M_nodes = consistent_nodal_mass(nodes, elements)
+    else:
+        raise ValueError(
+            "fit_random_init_basis_mass needs mass_matrix or nodes+elements "
+            "(consistent P1; lumped mass_nodes fallback removed)"
+        )
+    _ = mass_nodes
+    if M_nodes.shape[0] != n_nodes:
+        raise ValueError(f"mass size {M_nodes.shape[0]} != N*M={n_nodes}")
+
     rb = PCAReducerMultiChannelMass(random_state=random_state)
     rb.n_channels = c_in
     rb.out_channels = c_out
     rb.shape_ = (n, m)
     rb.output_shape_ = (c_out, n, m)
-    mass_nodes = np.asarray(mass_nodes, dtype=np.float64).reshape(-1)
-    w_in = mass_diag_stacked(mass_nodes, c_in, n, m)
-    w_out = mass_diag_stacked(mass_nodes, c_out, n, m)
-    rb.mass_nodes_ = mass_nodes.astype(np.float32)
-    rb.mass_diag_in_ = w_in.astype(np.float32)
-    rb.mass_diag_out_ = w_out.astype(np.float32)
+    rb.mass_nodes_ = np.asarray(M_nodes.diagonal(), dtype=np.float32)
+    rb.mass_in_ = mass_kron_channels(M_nodes, c_in)
+    rb.mass_out_ = mass_kron_channels(M_nodes, c_out)
+    rb.mass_diag_in_ = np.asarray(rb.mass_in_.sum(axis=1)).reshape(-1).astype(np.float32)
+    rb.mass_diag_out_ = np.asarray(rb.mass_out_.sum(axis=1)).reshape(-1).astype(np.float32)
 
     k_in = int(min(n_components_in or x_in.shape[1], x_in.shape[1]))
     k_out = int(min(n_components_out or y_out.shape[1], y_out.shape[1]))
     rows_in = _random_orthonormal_rows(x_in.shape[1], k_in, random_state=random_state)
     rows_out = _random_orthonormal_rows(y_out.shape[1], k_out, random_state=random_state)
-    rb.pca_in = pca_like_from_rows_mass(x_in.mean(0), rows_in, w_in, num_samples)
-    rb.pca_out = pca_like_from_rows_mass(y_out.mean(0), rows_out, w_out, num_samples)
+    rb.pca_in = pca_like_from_rows_mass(x_in.mean(0), rows_in, rb.mass_in_, num_samples)
+    rb.pca_out = pca_like_from_rows_mass(y_out.mean(0), rows_out, rb.mass_out_, num_samples)
     return rb
 

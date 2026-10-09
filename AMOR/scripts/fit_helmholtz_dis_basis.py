@@ -5,7 +5,8 @@ Helmholtz parametric map  m -> u = (u_real, u_imag), using the TRUE FEM Jacobian
 exposed by the hippylib PDE problem (no surrogate).
 
 Default input metric: Zahm option-2 prior_cov (GEVP Hφ = λ C^{-1} φ) on the
-extraction grid. Output DIS stays Euclidean on DoFs then extracted + QR.
+extraction grid. Output probes are J z with z = C^{1/2} ξ (same low-rank prior),
+then Euclidean SVD on the state DoFs and extraction to the grid.
 """
 
 import sys
@@ -147,8 +148,18 @@ def collect_and_svd(
                     stack_in.append(a_w * scale)
                 else:
                     stack_in.append(a_dof * scale)
-                h = _set_param(pde, rng.standard_normal(d_m))
-                stack_out.append(jac.Jv(h).get_local() * scale)
+                # Output: J z, z = C^{1/2} ξ in the same z-scored grid prior as the input.
+                if prior_cov is not None:
+                    z = prior_cov.apply_sqrt(rng.standard_normal(prior_cov.dim))
+                    if x_std is not None and np.asarray(x_std).size == z.size:
+                        z = z * np.asarray(x_std, dtype=np.float64).reshape(-1)
+                    v = grid_to_parameter_vector(
+                        Vh[hp.PARAMETER], z.reshape(nx, nx), box
+                    )
+                    stack_out.append(jac.Jv(v).get_local() * scale)
+                else:
+                    h = _set_param(pde, rng.standard_normal(d_m))
+                    stack_out.append(jac.Jv(h).get_local() * scale)
             if (s + 1) % 8 == 0 or (s + 1) == n_samples:
                 print(f"  sample {s+1}/{n_samples} ({time.time()-t:.1f}s)", flush=True)
         rows_in, ev_in = stack_in.finalize_svd(k, random_state=int(rng.integers(0, 2**31 - 1)))
@@ -198,6 +209,14 @@ def main():
     )
     ap.add_argument("--cov_rank", type=int, default=128)
     ap.add_argument("--cov_jitter_frac", type=float, default=1e-4)
+    ap.add_argument("--encoder", choices=("sigma", "cinv"), default="sigma")
+    ap.add_argument("--sigma_states", type=int, default=48, help="states for ΣΦ average")
+    ap.add_argument(
+        "--prior",
+        choices=("exact", "lowrank"),
+        default="exact",
+        help="exact hippylib BiLaplacian C vs low-rank+jitter sample cov",
+    )
     ap.add_argument("--out", default=None)
     ap.add_argument("--smoke", action="store_true", help="tiny run to validate operator/signs")
     args = ap.parse_args()
@@ -231,6 +250,8 @@ def main():
         n_samples = n_use
         print(f"Using dataset m from {data_path}: {n_use}/{n_all} states (no prior subsample)", flush=True)
         if args.input_metric == "prior_cov":
+            # MC probe whitening always uses fast low-rank sample cov on the grid.
+            # Exact hippylib prior is applied later for Φ/E (k modes), not 60k probes.
             ntr = int(0.7 * n_all)
             m_tr = np.asarray(d["m"][:ntr], dtype=np.float64)
             Xm = m_tr.mean(axis=(0, 1, 2), keepdims=True)
@@ -239,7 +260,7 @@ def main():
             x_std_flat = np.full(nx * nx, float(Xs.reshape(-1)[0]), dtype=np.float64)
             print(
                 f"Fitting LowRankPriorCov on z-scored m rank={args.cov_rank} "
-                f"shape={m_z.shape}",
+                f"shape={m_z.shape} (probe whitening)",
                 flush=True,
             )
             prior_cov = LowRankPriorCov.from_samples(
@@ -274,10 +295,78 @@ def main():
         prior_cov=prior_cov, x_std_flat=x_std_flat,
     )
 
+    from AMOR.models.dis_dual import (  # noqa: E402
+        assert_dual,
+        build_dual_encoder_from_sigma,
+        encoder_from_cinv,
+        phi_from_psi,
+    )
+
     if prior_cov is not None:
-        # Keep ψ (Euclidean in whitened grid space). AMOR whitens with C^{-1/2}.
-        rows_in = np.asarray(rows_in_raw[: args.k_in], dtype=np.float32)
+        psi = np.asarray(rows_in_raw[: args.k_in], dtype=np.float64)
         ev_in = ev_in[: args.k_in]
+        # Φ/E must use the same C as probe whitening. Mixing exact hippylib C with
+        # lowrank-whitened ψ breaks E Φᵀ ≈ I (observed ||EΦᵀ-I||~1e4). Exact prior
+        # wrapper remains available for DoF-space callers; grid DIS uses lowrank here.
+        cov_for_phi = prior_cov
+        if args.prior == "exact":
+            print(
+                "note: --prior exact requested but probes used LowRankPriorCov; "
+                "Φ/E use the same lowrank C for dual consistency "
+                "(GridMappedExactPrior kept for DoF-space use)",
+                flush=True,
+            )
+        phi = phi_from_psi(psi, cov_for_phi)
+        lam = np.asarray(ev_in, dtype=np.float64).reshape(-1)[: phi.shape[0]]
+
+        def _jtj_avg_grid(phi_flat: np.ndarray) -> np.ndarray:
+            """Average J^* J φ on the extraction grid (z-score / physical as in probes)."""
+            phi_g = np.asarray(phi_flat, dtype=np.float64).reshape(nx, nx)
+            # Map grid φ → DoF, apply J^* J, extract back.
+            n_use = n_samples if args.sigma_states <= 0 else min(args.sigma_states, n_samples)
+            acc = np.zeros(nx * nx, dtype=np.float64)
+            for s in range(n_use):
+                if m_grids is not None:
+                    m = grid_to_parameter_vector(Vh[hp.PARAMETER], m_grids[s], BOX)
+                else:
+                    noise = dl.Vector()
+                    prior.init_vector(noise, "noise")
+                    noise.set_local(np.random.randn(noise.local_size()))
+                    noise.apply("")
+                    m = pde.generate_parameter()
+                    prior.init_vector(m, 0)
+                    prior.sample(noise, m)
+                jac.relinearize(m)
+                # grid → dof for Jv direction
+                v = grid_to_parameter_vector(Vh[hp.PARAMETER], phi_g, BOX)
+                du = jac.Jv(v)
+                a_dof = jac.Jtw(du).get_local()
+                f = hp.vector2Function(_set_param(pde, a_dof), Vh[hp.PARAMETER])
+                a_grid = extract_to_grid(f, BOX, nx, nx).ravel().astype(np.float64)
+                if x_std_flat is not None:
+                    a_grid = a_grid * np.asarray(x_std_flat, dtype=np.float64).reshape(-1)
+                acc += a_grid
+            return acc / float(n_use)
+
+        if args.encoder == "sigma":
+            print("Building Helmholtz E = Λ^{-1}(Σ Φ)ᵀ …", flush=True)
+            rows_enc_in = build_dual_encoder_from_sigma(
+                phi, lam, _jtj_avg_grid, name="helm DIS_in sigma", atol=0.5
+            )
+            err = float(np.linalg.norm(rows_enc_in @ phi.T - np.eye(phi.shape[0])))
+            if err > 0.5:
+                print(f"ΣΦ residual {err:.3e} → fallback E=Φᵀ C^{-1}", flush=True)
+                rows_enc_in = encoder_from_cinv(phi, cov_for_phi)
+                assert_dual(rows_enc_in, phi, name="helm DIS_in cinv_fallback")
+                dis_version = "dual_encoder_cinv_fallback"
+            else:
+                dis_version = "dual_sigma"
+        else:
+            rows_enc_in = encoder_from_cinv(phi, cov_for_phi)
+            assert_dual(rows_enc_in, phi, name="helm DIS_in cinv")
+            dis_version = "dual_encoder_cinv"
+        rows_in = phi.astype(np.float32)
+        mass_whiten = "none"
     else:
         rows_in_dof, ev_in = rows_in_raw[: args.k_in], ev_in[: args.k_in]
         print("Extracting input eigenvectors to grid...", flush=True)
@@ -287,6 +376,9 @@ def main():
             g = extract_to_grid(f, BOX, nx, nx)
             rows_in_list.append(g.ravel())
         rows_in = _orthonormal_rows(np.stack(rows_in_list, 0))
+        rows_enc_in = rows_in
+        dis_version = "euclidean_dual"
+        mass_whiten = "none"
 
     rows_out_dof, ev_out = rows_out_dof[: args.k_out], ev_out[: args.k_out]
     print("Extracting output eigenvectors to grid...", flush=True)
@@ -295,13 +387,19 @@ def main():
         f = hp.vector2Function(_set_state(pde, r), Vh[hp.STATE])
         gr, gi = extract_vector_to_grid(f, BOX, nx, nx)
         rows_out.append(np.concatenate([gr.ravel(), gi.ravel()]))
+    # Output: M_out = I on the extraction grid ⇒ Euclidean M-orthonormal = QR.
     rows_out = _orthonormal_rows(np.stack(rows_out, 0))
+    rows_enc_out = np.asarray(rows_out, dtype=np.float32)  # M=I ⇒ E=Φ
 
-    out = args.out or expand(f"${{AMOR_SCRATCH_DATA}}/helmholtz_{args.variant}_basis/dis_rows_{args.variant}.npz")  # rename path on a different cluster
+    out = args.out or expand(
+        f"${{AMOR_SCRATCH_DATA}}/helmholtz_{args.variant}_basis/dis_rows_{args.variant}_dual_sigma.npz"
+    )
     os.makedirs(os.path.dirname(out), exist_ok=True)
     payload = dict(
         rows_in=rows_in,
+        rows_enc_in=np.asarray(rows_enc_in, dtype=np.float32),
         rows_out=rows_out,
+        rows_enc_out=rows_enc_out,
         eigvals_in=ev_in,
         eigvals_out=ev_out,
         nx=nx,
@@ -313,15 +411,18 @@ def main():
         from_dataset=bool(m_grids is not None),
         input_metric=np.asarray(args.input_metric),
         ortho_metric=np.asarray("C_inv" if prior_cov is not None else "I"),
-        mass_whiten=np.asarray("C_inv_sqrt" if prior_cov is not None else "none"),
+        mass_whiten=np.asarray(mass_whiten),
+        dis_version=np.asarray(dis_version),
+        prior_kind=np.asarray(args.prior if prior_cov is not None else "none"),
+        output_probe=np.asarray("C_sqrt_xi" if prior_cov is not None else "standard_normal"),
     )
-    if prior_cov is not None:
+    if prior_cov is not None and hasattr(prior_cov, "save_dict"):
         payload.update(prior_cov.save_dict())
-        if x_std_flat is not None:
-            payload["x_std_flat"] = x_std_flat.astype(np.float32)
+    if x_std_flat is not None:
+        payload["x_std_flat"] = np.asarray(x_std_flat, dtype=np.float32)
     np.savez_compressed(out, **payload)
-    print(f"rows_in {rows_in.shape} rows_out {rows_out.shape}", flush=True)
-    print(f"eig_in[:5]={ev_in[:5]}  eig_out[:5]={ev_out[:5]}", flush=True)
+    print(f"rows_in(Φ) {rows_in.shape} rows_enc_in(E) {np.asarray(rows_enc_in).shape} rows_out {rows_out.shape}", flush=True)
+    print(f"eig_in[:5]={ev_in[:5]}  eig_out[:5]={ev_out[:5]}  version={dis_version}", flush=True)
     print(f"Saved: {out}", flush=True)
 
 

@@ -441,26 +441,56 @@ def nodal_interpolation(model, X_new, Y_new, target_res, device='cuda'):
     return compute_relative_errors(Y_pred, Y_new)
 
 
+def _amor_decoder_rows_and_means(model: AMOR):
+    """Physical decoder rows Φ (k,D) and means — not dual encoder E."""
+    k_in = int(getattr(model, "k_in", model.block0.k_in))
+    k_out = int(getattr(model, "k_out", model.block1.k_out))
+    if getattr(model, "shared_fixed_basis", None) is not None:
+        h = model.shared_fixed_basis
+        phi_in = h.in_comp.detach().cpu().numpy()[:k_in]
+        mean_in = h.in_mean.detach().cpu().numpy()
+        phi_out = h.out_comp.detach().cpu().numpy()[:k_out]
+        mean_out = h.out_mean.detach().cpu().numpy()
+    else:
+        # block0 decodes with input Φ; transition (block1) decodes with output Φ
+        phi_in = model.block0.dec_components.detach().cpu().numpy()[:k_in]
+        mean_in = model.block0.dec_mean.detach().cpu().numpy()
+        phi_out = model.block1.dec_components.detach().cpu().numpy()[:k_out]
+        mean_out = model.block1.dec_mean.detach().cpu().numpy()
+    return phi_in, mean_in, phi_out, mean_out
+
+
+def _model_grid_hw(model):
+    """(N, M) spatial size for AMOR/PCANet."""
+    if hasattr(model, "N") and hasattr(model, "M"):
+        return int(model.N), int(model.M)
+    sh = getattr(model, "spatial_shape", None)
+    if sh is not None and len(sh) >= 2:
+        return int(sh[0]), int(sh[1])
+    raise AttributeError("model has no N/M or spatial_shape")
+
+
 def l2_projection(model, X_new, Y_new, X_train_orig, Y_train_orig,
-                  target_res, device='cuda', batch_size=32):
-    """Transfer method 2: L2 projection (interpolate PCA components)."""
+                  target_res, device='cuda', batch_size=32, dual_encoder: bool = True):
+    """Transfer method 2: interpolate decoder modes B; dual encoder E=pinv(B).
+
+    On equal-weight grids no mass renormalization is required. ``dual_encoder``
+    (default True) sets ``encoder_components_ = pinv(B)`` so encode uses E, not Bᵀ.
+    """
     if not (hasattr(model, 'block0') or hasattr(model, 'enc_components_t')):
         raise ValueError("L2 projection only works for AMOR/PCANet models")
     
     model.eval()
-    N_train, M_train = model.N, model.M
+    N_train, M_train = _model_grid_hw(model)
     N_new, M_new = target_res
     
-    # Extract PCA components from model
+    # Extract physical decoder Φ (never dual E from enc_components_t)
     if isinstance(model, AMOR):
-        enc_components_old = model.block0.enc_components_t.cpu().numpy().T  # (k_in, D_in)
-        enc_mean_old = model.block0.enc_mean.cpu().numpy()  # (D_in,)
-        dec_components_old = model.block1.dec_components.cpu().numpy()  # (k_out, D_out)
-        dec_mean_old = model.block1.dec_mean.cpu().numpy()  # (D_out,)
+        enc_components_old, enc_mean_old, dec_components_old, dec_mean_old = _amor_decoder_rows_and_means(model)
         C_in = model.C_in
         C_out = model.C_out
-        k_in = model.block0.k_in
-        k_out = model.block1.k_out
+        k_in = int(getattr(model, "k_in", model.block0.k_in))
+        k_out = int(getattr(model, "k_out", model.block1.k_out))
     elif isinstance(model, PCANet):
         # PCANet: get directly
         enc_components_old = model.enc_components_t.cpu().numpy().T  # (k_in, D_in)
@@ -514,6 +544,17 @@ def l2_projection(model, X_new, Y_new, X_train_orig, Y_train_orig,
     dec_components_new = dec_components_new_spatial.reshape(k_out, D_out_new)
     enc_mean_new = enc_mean_new_spatial.reshape(D_in_new)
     dec_mean_new = dec_mean_new_spatial.reshape(D_out_new)
+
+    # Dual encoder on equal-weight grid: E = pinv(B), B unchanged (no renormalization).
+    if dual_encoder:
+        E_in = np.linalg.pinv(enc_components_new).T.astype(np.float32)  # (k, D) rows
+        E_out = np.linalg.pinv(dec_components_new).T.astype(np.float32)
+        # pinv(B) is (D,k); rows = pinv(B).T → (k,D). Check E B^T ≈ I.
+        err_in = float(np.linalg.norm(E_in @ enc_components_new.T - np.eye(k_in)))
+        err_out = float(np.linalg.norm(E_out @ dec_components_new.T - np.eye(k_out)))
+        print(f"grid dual: ||E_in B_in^T - I||_F={err_in:.3e}  ||E_out B_out^T - I||_F={err_out:.3e}", flush=True)
+    else:
+        E_in = E_out = None
     
     # Create new PCAReducer with interpolated components
     from sklearn.decomposition import PCA
@@ -528,18 +569,25 @@ def l2_projection(model, X_new, Y_new, X_train_orig, Y_train_orig,
     n_out_components = max(k_in, k_out)
     pca_in_new = PCA()
     pca_in_new.n_components_ = k_in
-    pca_in_new.components_ = enc_components_new
-    pca_in_new.mean_ = enc_mean_new
+    pca_in_new.components_ = enc_components_new.astype(np.float32)
+    pca_in_new.mean_ = enc_mean_new.astype(np.float32)
     pca_in_new.explained_variance_ratio_ = np.ones(k_in) / k_in  # Dummy values
+    if E_in is not None:
+        pca_in_new.encoder_components_ = E_in
 
     pca_out_new = PCA()
     pca_out_new.n_components_ = n_out_components
     if n_out_components > k_out:
         pad = np.zeros((n_out_components - k_out, D_out_new), dtype=np.float32)
-        pca_out_new.components_ = np.concatenate([dec_components_new, pad], axis=0)
+        pca_out_new.components_ = np.concatenate([dec_components_new.astype(np.float32), pad], axis=0)
+        if E_out is not None:
+            pad_e = np.zeros((n_out_components - k_out, D_out_new), dtype=np.float32)
+            pca_out_new.encoder_components_ = np.concatenate([E_out, pad_e], axis=0)
     else:
-        pca_out_new.components_ = dec_components_new
-    pca_out_new.mean_ = dec_mean_new
+        pca_out_new.components_ = dec_components_new.astype(np.float32)
+        if E_out is not None:
+            pca_out_new.encoder_components_ = E_out
+    pca_out_new.mean_ = dec_mean_new.astype(np.float32)
     pca_out_new.explained_variance_ratio_ = np.ones(n_out_components) / n_out_components  # Dummy values
 
     rb_new.pca_in = pca_in_new
@@ -556,8 +604,9 @@ def l2_projection(model, X_new, Y_new, X_train_orig, Y_train_orig,
             dropout=0.0,
             init_scale=0.1,
             use_skip_connections=True,
-            use_batch_norm=True,
-            use_coordinates=model.use_coordinates,
+            use_batch_norm=False,
+            share_bases=True,
+            use_coordinates=False,
         )
     elif isinstance(model, PCANet):
         model_new = PCANet(
@@ -572,7 +621,19 @@ def l2_projection(model, X_new, Y_new, X_train_orig, Y_train_orig,
     else:
         raise ValueError(f"Unknown model type: {type(model)}")
 
-    # Transfer only compatible parameters.
+    # Transfer learnable θ only (bases already set from interpolated Φ / dual E).
+    old_sd = model.state_dict()
+    new_sd = model_new.state_dict()
+    filtered = {
+        k: v
+        for k, v in old_sd.items()
+        if k in new_sd
+        and new_sd[k].shape == v.shape
+        and "components" not in k
+        and not k.endswith("_mean")
+        and "shared_fixed_basis" not in k
+    }
+    model_new.load_state_dict(filtered, strict=False)
     model_new = model_new.to(device)
     
     test_loader = DataLoader(
@@ -636,8 +697,8 @@ def pca_refitting(model, X_new, Y_new, X_train_orig, Y_train_orig,
             dropout=0.0,
             init_scale=0.1,
             use_skip_connections=True,
-            use_batch_norm=True,
-            use_coordinates=model.use_coordinates,
+            use_batch_norm=False,
+            use_coordinates=False,
         )
     elif isinstance(model, PCANet):
         model_new = PCANet(
@@ -734,7 +795,7 @@ def pca_on_finest(model, X_new, Y_new, target_res, finest_res, device='cuda', ba
 
     if isinstance(model, AMOR):
         model_finest = AMOR(width=model.width, rb=rb_finest, k_in=k_in, k_out=k_out, layers=model.num_layers,
-                             dropout=0.0, init_scale=0.1, use_skip_connections=True, use_batch_norm=True, use_coordinates=model.use_coordinates)
+                             dropout=0.0, init_scale=0.1, use_skip_connections=True, use_batch_norm=False, use_coordinates=False)
     else:
         model_finest = PCANet(rb=rb_finest, k_in=k_in, k_out=k_out, hidden=1024, depth=5, dropout=0.0, init_scale=0.1)
     model_finest.load_state_dict(model.state_dict(), strict=False)
@@ -769,9 +830,13 @@ def _mass_matrix_uniform(n: int, m: int) -> np.ndarray:
 
 
 def _fit_pca_mass_matrix(X: np.ndarray, M: np.ndarray, n_components: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Fit PCA with M-inner product: solve C v = lambda M v for M-orthonormal components.
-    X: (n_samples, n_features), M: (n_features,) diagonal of mass matrix.
-    Returns: components (n_components, n_features), mean (n_features,), evr (n_components,)."""
+    """Fit PCA with M-inner product: solve C v = λ M v for M-orthonormal components.
+
+    X: (n_samples, n_features). M may be a 1-d nodal weight vector (uniform-grid
+    mass, stored as diag) or a full dense SPD matrix — not restricted to diagonal
+    operators beyond that convenience form.
+    Returns: components (n_components, n_features), mean, evr.
+    """
     X_centered = X - X.mean(axis=0)
     n_samples = X.shape[0]
     C = (X_centered.T @ X_centered) / max(n_samples - 1, 1)
@@ -849,7 +914,7 @@ def mass_matrix_transfer(model, X_new, Y_new, X_train_orig, Y_train_orig,
 
     if isinstance(model, AMOR):
         model_new = AMOR(width=model.width, rb=rb_new, k_in=k_in, k_out=k_out, layers=model.num_layers,
-                          dropout=0.0, init_scale=0.1, use_skip_connections=True, use_batch_norm=True, use_coordinates=model.use_coordinates)
+                          dropout=0.0, init_scale=0.1, use_skip_connections=True, use_batch_norm=False, use_coordinates=False)
     else:
         model_new = PCANet(rb=rb_new, k_in=k_in, k_out=k_out, hidden=1024, depth=5, dropout=0.0, init_scale=0.1)
     model_new.load_state_dict(model.state_dict(), strict=False)
@@ -1018,8 +1083,8 @@ def main():
                 dropout=0.0,
                 init_scale=0.1,
                 use_skip_connections=True,
-                use_batch_norm=True,
-                use_coordinates=True,
+                use_batch_norm=False,
+                use_coordinates=False,
             )
             amor_model.load_state_dict(state, strict=True)
             try:
@@ -1047,8 +1112,8 @@ def main():
                 dropout=0.0,
                 init_scale=0.1,
                 use_skip_connections=True,
-                use_batch_norm=True,
-                use_coordinates=True,
+                use_batch_norm=False,
+                use_coordinates=False,
             )
         print("No AMOR checkpoint found, training...")
         train_model(amor_model, train_loader, val_loader,

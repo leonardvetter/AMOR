@@ -70,6 +70,8 @@ def load_data(path, num_samples):
 
 
 def rb_from_dis(path, Xtr, Ytr, k_in, k_out):
+    from AMOR.models.dis_dual import assert_dual, encoder_from_cinv, phi_from_psi
+
     d = np.load(path)
     n = int(d["nx"]) if "nx" in d.files else int(d["N"]) if "N" in d.files else int(round(np.sqrt(Xtr.shape[2] * Xtr.shape[3])))
     ns = Xtr.shape[0]
@@ -79,25 +81,42 @@ def rb_from_dis(path, Xtr, Ytr, k_in, k_out):
     ortho = _npz_str(d, "ortho_metric")
     input_metric = _npz_str(d, "input_metric")
     use_cinv = ortho == "C_inv" or input_metric == "prior_cov" or "cov_V" in d.files
-    cov = LowRankPriorCov.from_save_dict(d) if use_cinv else None
-    # Never keep more modes than prior rank (Cinv) or stored DIS rows.
+    cov = LowRankPriorCov.from_save_dict(d) if use_cinv and "cov_V" in d.files else None
+    # When dual E is already stored, use all Φ/E rows (cov_rank only limits ψ→Φ migrate).
     k_in_eff = min(int(k_in), int(d["rows_in"].shape[0]))
-    if cov is not None:
-        k_in_eff = min(k_in_eff, int(cov.rank))
-        if k_in_eff < int(k_in):
-            print(f"clamp k_in {k_in} → {k_in_eff} (cov_rank={cov.rank})", flush=True)
     k_out_eff = min(int(k_out), int(d["rows_out"].shape[0]))
     rows_in = np.asarray(d["rows_in"][:k_in_eff], dtype=np.float64)
     rows_out = np.asarray(d["rows_out"][:k_out_eff], dtype=np.float64)
-    if use_cinv:
-        # ψ Euclidean-ortho in C^{-1/2} space ≡ encode (C^{-1}Φ)^T with Φ=C^{1/2}ψ.
-        mean = np.zeros(rows_in.shape[1], dtype=np.float64)
-        rb.pca_in = _pca_like_from_rows(mean, rows_in, ns)
-        rb.prior_cov_ = cov
-        print(f"DIS C^{{-1}}-in({rows_in.shape[0]}) cov_rank={cov.rank} (whiten+ψ)", flush=True)
+    x_mean = Xtr.reshape(ns, -1).mean(0)
+    y_mean = Ytr.reshape(ns, -1).mean(0)
+
+    if "rows_enc_in" in d.files:
+        # New dual-encoder DIS: components_=Φ, encoder_components_=E; no whitening.
+        E = np.asarray(d["rows_enc_in"][:k_in_eff], dtype=np.float64)
+        assert_dual(E, rows_in, name="load DIS_in")
+        rb.pca_in = _pca_like_from_rows(x_mean, rows_in, ns)
+        rb.pca_in.encoder_components_ = E.astype(np.float32)
+        print(f"DIS dual-encoder in({rows_in.shape[0]}) out({rows_out.shape[0]})", flush=True)
+    elif use_cinv and cov is not None:
+        # Migrate legacy ψ files → Φ / E on the fly.
+        k_mig = min(k_in_eff, int(cov.rank))
+        if k_mig < k_in_eff:
+            print(f"clamp k_in {k_in_eff} → {k_mig} (cov_rank={cov.rank})", flush=True)
+        rows_in = rows_in[:k_mig]
+        phi = phi_from_psi(rows_in, cov)
+        E = encoder_from_cinv(phi, cov)
+        assert_dual(E, phi, name="migrate DIS_in")
+        rb.pca_in = _pca_like_from_rows(x_mean, phi, ns)
+        rb.pca_in.encoder_components_ = E.astype(np.float32)
+        print(f"DIS migrated ψ→Φ/E in({phi.shape[0]}) cov_rank={cov.rank}", flush=True)
     else:
-        rb.pca_in = _pca_like_from_rows(Xtr.reshape(ns, -1).mean(0), rows_in, ns)
-    rb.pca_out = _pca_like_from_rows(Ytr.reshape(ns, -1).mean(0), rows_out, ns)
+        rb.pca_in = _pca_like_from_rows(x_mean, rows_in, ns)
+    rb.pca_out = _pca_like_from_rows(y_mean, rows_out, ns)
+    # Output M_out = I ⇒ M-adjoint encoder = Φ_out (or rows_enc_out if stored).
+    if "rows_enc_out" in d.files:
+        rb.pca_out.encoder_components_ = np.asarray(d["rows_enc_out"][:k_out_eff], dtype=np.float32)
+    else:
+        rb.pca_out.encoder_components_ = np.asarray(rb.pca_out.components_, dtype=np.float32)
     rb.basis_type = "dis"
     rb.output_on_increment = False
     return rb
@@ -185,7 +204,7 @@ def train(model, tr, va, dev, args):
             best, be, best_st, pat = vl, ep, copy.deepcopy(model.state_dict()), 0
         else:
             pat += 1
-        if (ep + 1) % 50 == 0:
+        if ep == 0 or (ep + 1) % 10 == 0:
             print(f"  epoch {ep + 1} val_l1={vl:.6f} best={best:.6f}@{be + 1}", flush=True)
         if pat >= (args.epochs + 1 if args.basis_type in LEARNED else args.early_stopping_patience):
             break
@@ -216,8 +235,18 @@ def main():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--k_in", type=int, default=K_IN)
     p.add_argument("--k_out", type=int, default=K_OUT)
+    p.add_argument("--width", type=int, default=WIDTH)
+    p.add_argument("--layers", type=int, default=LAYERS,
+                   help="Total nonlocal blocks including transition (current semantics).")
+    p.add_argument(
+        "--use_factorized_weights",
+        choices=("auto", "true", "false"),
+        default="auto",
+        help="Factorized T (default auto).",
+    )
     p.add_argument("--laplacian_periodic", action=argparse.BooleanOptionalAction, default=False)
     args = p.parse_args()
+    fact = {"auto": "auto", "true": True, "false": False}[args.use_factorized_weights]
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     tag_early = args.tag or args.basis_type
@@ -263,15 +292,29 @@ def main():
         tag = args.basis_type
         if args.basis_type == "dis" and (args.k_in != K_IN or args.k_out != K_OUT):
             tag = f"dis_k{kin}"
-    model = AMOR(width=WIDTH, rb=rb, k_in=kin, k_out=kout, layers=LAYERS, dropout=0.0, init_scale=0.1,
-                  use_skip_connections=True, use_batch_norm=False, use_coordinates=False,
-                  trainable_basis=learned, trainable_basis_param=args.basis_type.replace("learned_", "") if learned else "qr")
+    model = AMOR(
+        width=args.width, rb=rb, k_in=kin, k_out=kout, layers=args.layers, dropout=0.0, init_scale=0.1,
+        use_skip_connections=True, use_batch_norm=False, use_coordinates=False,
+        use_factorized_weights=fact,
+        trainable_basis=learned,
+        trainable_basis_param=args.basis_type.replace("learned_", "") if learned else "qr",
+        share_bases=not learned,
+    )
     model.to(dev)
+    n_params = sum(p.numel() for p in model.parameters())
+    n_blocks = model.n_nonlocal_blocks()
+    print(
+        f"AMOR ready tag={tag} k_in={kin} k_out={kout} layers={args.layers} "
+        f"blocks={n_blocks} factorized={fact} params={n_params:,}",
+        flush=True,
+    )
     _, be, ep_ran, ttrain = train(model, tr, va, dev, args)
     tl1, tl2 = eval_phys(model, te, dev, Ym, Ys)
     infer = infer_ms(model, te, dev)
     summary = dict(dataset="nonlinear_diffusion", basis_type=args.basis_type, k_in=kin, k_out=kout,
-                   width=WIDTH, layers=LAYERS, batch_size=BATCH, epochs_ran=ep_ran, best_epoch=be,
+                   width=args.width, layers=args.layers, n_blocks=n_blocks,
+                   use_factorized_weights=str(fact),
+                   num_params=n_params, batch_size=BATCH, epochs_ran=ep_ran, best_epoch=be,
                    test_rel_l1=tl1, test_rel_l2=tl2,
                    train_sec_per_epoch=ttrain / max(1, ep_ran), inference_ms_per_sample=infer,
                    training_time_sec=ttrain, dis_rows_path=dis_path if args.basis_type == "dis" else None,

@@ -57,21 +57,27 @@ def mesh_laplacian_eigen_rows(
     elements: np.ndarray,
     k: int,
     mass_nodes: np.ndarray | None = None,
+    mass_matrix=None,
 ) -> np.ndarray:
     """Lowest-frequency mesh Laplacian modes as rows (k, N).
 
-    If ``mass_nodes`` is given (lumped nodal mass), solve the generalized
-    eigenproblem ``L φ = λ M φ`` with ``M = diag(mass)`` so modes are
-    M-orthonormal (φᵀ M ψ = δ). Otherwise solve the Euclidean problem
-    ``L φ = λ φ``.
+    Prefer ``mass_matrix`` (sparse SPD) or consistent P1 from the mesh.
+    Solves ``L φ = λ M φ`` (M-orthonormal) or the Euclidean problem when no mass.
     """
+    from .mass.mesh_mass import consistent_nodal_mass
+
     L = graph_laplacian_from_tets(nodes, elements)
     n_eigs = min(k, L.shape[0] - 2)
-    if mass_nodes is not None:
-        m = np.asarray(mass_nodes, dtype=np.float64).reshape(-1)
-        if m.size != L.shape[0]:
-            raise ValueError(f"mass_nodes size {m.size} != n_nodes {L.shape[0]}")
-        M = sp.diags(np.maximum(m, 1e-30))
+    M = None
+    if mass_matrix is not None:
+        M = sp.csr_matrix(mass_matrix, dtype=np.float64)
+    elif mass_nodes is not None:
+        # Consistent P1 only (mass_nodes is a legacy presence flag).
+        M = consistent_nodal_mass(nodes, elements)
+        _ = mass_nodes
+    if M is not None:
+        if M.shape[0] != L.shape[0]:
+            raise ValueError(f"mass shape {M.shape} != n_nodes {L.shape[0]}")
         _, evecs = spla.eigsh(L, k=n_eigs, M=M, which="SM")
     else:
         _, evecs = spla.eigsh(L, k=n_eigs, which="SM")
@@ -210,7 +216,8 @@ def fit_mesh_alternative_basis_mass(
     n_components_out: int | None = None,
 ):
     """Mesh alternative bases compatible with PCAReducerMultiChannelMass."""
-    from .mass.mesh_mass import mass_diag_stacked
+    import scipy.sparse as sp
+    from .mass.mesh_mass import consistent_nodal_mass, mass_kron_channels
     from .PCAReducer import PCAReducerMultiChannelMass, pca_like_from_rows_mass
 
     x_in, num_samples, c_in, n, m = _flatten_samples(samples)
@@ -221,9 +228,10 @@ def fit_mesh_alternative_basis_mass(
         raise ValueError("Input/output spatial dims must match")
     y_out = solution.reshape(num_samples, -1).astype(np.float32, copy=False)
 
-    mass_nodes = np.asarray(mass_nodes, dtype=np.float64).reshape(-1)
-    w_in = mass_diag_stacked(mass_nodes, c_in, n, m)
-    w_out = mass_diag_stacked(mass_nodes, c_out, n, m)
+    M_nodes = consistent_nodal_mass(nodes, elements)
+    mass_nodes = np.asarray(M_nodes.diagonal(), dtype=np.float64)
+    M_in = mass_kron_channels(M_nodes, c_in)
+    M_out = mass_kron_channels(M_nodes, c_out)
 
     rb = PCAReducerMultiChannelMass(random_state=random_state)
     rb.n_channels = c_in
@@ -231,8 +239,10 @@ def fit_mesh_alternative_basis_mass(
     rb.shape_ = (n, m)
     rb.output_shape_ = (c_out, n, m)
     rb.mass_nodes_ = mass_nodes.astype(np.float32)
-    rb.mass_diag_in_ = w_in.astype(np.float32)
-    rb.mass_diag_out_ = w_out.astype(np.float32)
+    rb.mass_in_ = M_in
+    rb.mass_out_ = M_out
+    rb.mass_diag_in_ = np.asarray(M_in.sum(axis=1)).reshape(-1).astype(np.float32)
+    rb.mass_diag_out_ = np.asarray(M_out.sum(axis=1)).reshape(-1).astype(np.float32)
 
     def _cap(k, feat):
         hi = min(num_samples, feat)
@@ -246,10 +256,10 @@ def fit_mesh_alternative_basis_mass(
     if basis_type == "pca":
         return PCAReducerMultiChannelMass(
             svd_solver="randomized", random_state=random_state,
-        ).fit(samples, solution, mass_nodes=mass_nodes, k_in=k_in, k_out=max(k_in, k_out))
+        ).fit(samples, solution, k_in=k_in, k_out=max(k_in, k_out),
+              nodes=nodes, elements=elements)
 
-    # Laplacian: pass lumped mass into the GEVP Lφ=λMφ. Polynomials still built
-    # Euclidean then remassed below (same as before).
+    # Laplacian GEVP uses consistent P1 mass; polynomials remassed via Gram below.
     mass_for_lap = mass_nodes if basis_type == "laplacian" else None
     rb.pca_in = _fit_mesh_side(
         x_in, x_in.mean(0), basis_type, k_in, num_samples, random_state,
@@ -261,13 +271,11 @@ def fit_mesh_alternative_basis_mass(
         nodes, elements, c_out, jacobi_alpha, jacobi_beta,
         mass_nodes=mass_for_lap,
     )
-    # Re-wrap rows into mass-PCA views (Φ M Φᵀ = I). For Laplacian GEVP spatial
-    # modes are already M-ON; QR after channelize preserves that constraint.
     rb.pca_in = pca_like_from_rows_mass(
-        x_in.mean(0), rb.pca_in.components_, w_in, num_samples,
+        x_in.mean(0), rb.pca_in.components_, M_in, num_samples,
     )
     rb.pca_out = pca_like_from_rows_mass(
-        y_out.mean(0), rb.pca_out.components_, w_out, num_samples,
+        y_out.mean(0), rb.pca_out.components_, M_out, num_samples,
     )
     rb.basis_type = basis_type
     return rb

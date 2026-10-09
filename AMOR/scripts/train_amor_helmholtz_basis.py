@@ -103,10 +103,12 @@ def load_helmholtz(path: str, num_samples: int):
 
 
 def _rb_from_dis_rows(dis_rows_path, X_train, Y_train, k_in, k_out):
-    """Build a PCAReducer from precomputed faithful-DIS spatial rows (true FEM Jacobian)."""
+    """Build a PCAReducer from precomputed dual-encoder DIS rows."""
+    from AMOR.models.dis_dual import assert_dual, encoder_from_cinv, phi_from_psi
+
     d = np.load(dis_rows_path)
-    rows_in = d["rows_in"].astype(np.float64)      # (k, C_in*N*M)
-    rows_out = d["rows_out"].astype(np.float64)     # (k, C_out*N*M)
+    rows_in = d["rows_in"].astype(np.float64)
+    rows_out = d["rows_out"].astype(np.float64)
     n = int(d["nx"]); c_in = int(d["c_in"]); c_out = int(d["c_out"])
     num_samples = X_train.shape[0]
     x_mean = X_train.reshape(num_samples, -1).mean(0)
@@ -119,15 +121,31 @@ def _rb_from_dis_rows(dis_rows_path, X_train, Y_train, k_in, k_out):
     ortho = _npz_str(d, "ortho_metric")
     input_metric = _npz_str(d, "input_metric")
     use_cinv = ortho == "C_inv" or input_metric == "prior_cov" or "cov_V" in d.files
-    if use_cinv:
+    k_in_eff = min(int(k_in), rows_in.shape[0])
+    k_out_eff = min(int(k_out), rows_out.shape[0])
+    if "rows_enc_in" in d.files:
+        E = np.asarray(d["rows_enc_in"][:k_in_eff], dtype=np.float64)
+        Phi = rows_in[:k_in_eff]
+        assert_dual(E, Phi, name="load helm DIS_in")
+        rb.pca_in = _pca_like_from_rows(x_mean, Phi, num_samples)
+        rb.pca_in.encoder_components_ = E.astype(np.float32)
+        print(f"DIS dual-encoder in({Phi.shape[0]}) out({k_out_eff})", flush=True)
+    elif use_cinv and "cov_V" in d.files:
         cov = LowRankPriorCov.from_save_dict(d)
-        mean = np.zeros(rows_in.shape[1], dtype=np.float64)
-        rb.pca_in = _pca_like_from_rows(mean, rows_in[:k_in], num_samples)
-        rb.prior_cov_ = cov
-        print(f"DIS C^{{-1}}-in({min(k_in, rows_in.shape[0])}) cov_rank={cov.rank} (whiten+ψ)", flush=True)
+        k_in_eff = min(k_in_eff, int(cov.rank))
+        phi = phi_from_psi(rows_in[:k_in_eff], cov)
+        E = encoder_from_cinv(phi, cov)
+        assert_dual(E, phi, name="migrate helm DIS_in")
+        rb.pca_in = _pca_like_from_rows(x_mean, phi, num_samples)
+        rb.pca_in.encoder_components_ = E.astype(np.float32)
+        print(f"DIS migrated ψ→Φ/E in({phi.shape[0]}) cov_rank={cov.rank}", flush=True)
     else:
-        rb.pca_in = _pca_like_from_rows(x_mean, rows_in[:k_in], num_samples)
-    rb.pca_out = _pca_like_from_rows(y_mean, rows_out[:k_out], num_samples)
+        rb.pca_in = _pca_like_from_rows(x_mean, rows_in[:k_in_eff], num_samples)
+    rb.pca_out = _pca_like_from_rows(y_mean, rows_out[:k_out_eff], num_samples)
+    if "rows_enc_out" in d.files:
+        rb.pca_out.encoder_components_ = np.asarray(d["rows_enc_out"][:k_out_eff], dtype=np.float32)
+    else:
+        rb.pca_out.encoder_components_ = np.asarray(rb.pca_out.components_, dtype=np.float32)
     rb.basis_type = "dis"
     rb.output_on_increment = False
     return rb
@@ -197,8 +215,8 @@ def train(model, train_loader, val_loader, device, args):
         if patience >= (args.epochs + 1 if _is_learned(args.basis_type) else args.early_stopping_patience):
             print(f"  Early stop @ epoch {epoch+1} (best {best_epoch+1})")
             break
-        if (epoch + 1) % 50 == 0:
-            print(f"  epoch {epoch+1}/{args.epochs} val={val_loss:.6f}")
+        if epoch == 0 or (epoch + 1) % 10 == 0:
+            print(f"  epoch {epoch+1}/{args.epochs} val={val_loss:.6f}", flush=True)
     train_time = time.time() - t0
     model.load_state_dict(best_state)
     return best_val, best_epoch + 1, epochs_ran, train_time
@@ -264,16 +282,30 @@ def main():
     p.add_argument("--jacobi_beta", type=float, default=1.0)
     p.add_argument("--dis_rows_path", default=None,
                    help="faithful-DIS rows .npz from fit_helmholtz_dis_basis.py (required for --basis_type dis)")
+    p.add_argument("--tag", default=None,
+                   help="Filename tag (default: basis_type). Writes amor_helmholtz_{variant}_{tag}_*.json/pt")
+    p.add_argument("--layers", type=int, default=None,
+                   help="Override total nonlocal blocks (incl. transition). Default: variant cfg.")
+    p.add_argument(
+        "--use_factorized_weights",
+        choices=("auto", "true", "false"),
+        default="auto",
+        help="Factorized T (default auto).",
+    )
     p.add_argument("--skip_if_exists", action="store_true")
     args = p.parse_args()
 
     cfg = VARIANT_CFG[args.variant]
     k_in, k_out, width, layers = cfg["k_in"], cfg["k_out"], cfg["width"], cfg["layers"]
+    if args.layers is not None:
+        layers = int(args.layers)
+    fact = {"auto": "auto", "true": True, "false": False}[args.use_factorized_weights]
 
     if args.checkpoint_dir is None:
         args.checkpoint_dir = expand(f"${{AMOR_SCRATCH_DATA}}/helmholtz_{args.variant}_basis")  # rename path on a different cluster
     os.makedirs(args.checkpoint_dir, exist_ok=True)
-    metrics_path = os.path.join(args.checkpoint_dir, f"amor_helmholtz_{args.variant}_{args.basis_type}_metrics.json")
+    tag = args.tag or args.basis_type
+    metrics_path = os.path.join(args.checkpoint_dir, f"amor_helmholtz_{args.variant}_{tag}_metrics.json")
     if args.skip_if_exists and os.path.isfile(metrics_path):
         print(f"Skip: {metrics_path} exists")
         return
@@ -298,7 +330,7 @@ def main():
 
     def loader(Xa, Ya, shuffle):
         return DataLoader(TensorDataset(torch.from_numpy(Xa), torch.from_numpy(Ya)),
-                          batch_size=args.batch_size, shuffle=shuffle, num_workers=2)
+                          batch_size=args.batch_size, shuffle=shuffle, num_workers=0)
     train_loader = loader(Xtr, Ytr, True)
     val_loader = loader(Xval, Yval, False)
     test_loader = loader(Xte, Yte, False)
@@ -317,12 +349,14 @@ def main():
         width=width, rb=rb, k_in=k_in, k_out=k_out, layers=layers,
         dropout=0.0, init_scale=0.1, use_skip_connections=True,
         use_batch_norm=False, use_coordinates=False, add_constant_mode=False,
-        use_factorized_weights=False,
+        use_factorized_weights=fact,
         trainable_basis=learned,
         trainable_basis_param=_learnable_param(args.basis_type) if learned else "qr",
+        share_bases=not learned,
     )
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Params: {n_params:,}")
+    n_blocks = model.n_nonlocal_blocks()
+    print(f"Params: {n_params:,}  blocks={n_blocks}")
 
     best_val, best_epoch, epochs_ran, train_time = train(model, train_loader, val_loader, device, args)
     sec_per_epoch = train_time / max(1, epochs_ran)
@@ -337,9 +371,14 @@ def main():
     summary = {
         "dataset": f"helmholtz_{args.variant}",
         "basis_type": args.basis_type,
+        "tag": tag,
+        "dis_rows_path": args.dis_rows_path if args.basis_type == "dis" else None,
+        "dis_version": "dual_encoder" if args.basis_type == "dis" else None,
         "output_on_increment": False,
         "trainable_basis": learned,
         "k_in": k_in, "k_out": k_out, "width": width, "layers": layers,
+        "n_blocks": n_blocks,
+        "use_factorized_weights": str(fact),
         "batch_size": args.batch_size,
         "epochs_ran": epochs_ran, "best_epoch": best_epoch,
         "test_rel_l1": test_l1, "test_rel_l2": test_l2,
@@ -353,7 +392,7 @@ def main():
     }
     with open(metrics_path, "w") as f:
         json.dump(summary, f, indent=2)
-    ckpt = os.path.join(args.checkpoint_dir, f"amor_helmholtz_{args.variant}_{args.basis_type}_best.pt")
+    ckpt = os.path.join(args.checkpoint_dir, f"amor_helmholtz_{args.variant}_{tag}_best.pt")
     torch.save({"model_state_dict": model.state_dict(), **summary}, ckpt)
     print(f"Saved metrics: {metrics_path}\nSaved ckpt: {ckpt}")
 

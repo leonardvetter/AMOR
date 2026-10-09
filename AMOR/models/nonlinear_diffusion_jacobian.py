@@ -137,9 +137,17 @@ def collect_dis_probes(
         if prior_cov is not None:
             a = prior_cov.apply_sqrt(a)
         a_list.append(a * scale)
-        vf = rng.standard_normal(jac.d)
-        vm = rng.standard_normal(jac.d)
-        b_list.append(jac.Jv(vf, vm) * scale)
+        # Output snapshots are J z with z = C^{1/2} ξ, ξ ~ N(0, I), using the
+        # same low-rank prior as the input. C is the covariance of z-scored
+        # (f, m); J acts in physical coordinates.
+        d = jac.d
+        if prior_cov is not None:
+            z = prior_cov.apply_sqrt(rng.standard_normal(prior_cov.dim))
+            if x_std is not None:
+                z = z * x_std
+        else:
+            z = rng.standard_normal(2 * d)
+        b_list.append(jac.Jv(z[:d], z[d:]) * scale)
     return np.stack(a_list, 0), np.stack(b_list, 0)
 
 
@@ -159,11 +167,12 @@ def fit_dis_rows_from_data(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """n_states<=0 → every sample in f_samples (no subsample).
 
-    If prior_cov given: probe with C^{1/2} on (optionally z-scored) input adjoints;
+    If prior_cov given: input adjoints are whitened by C^{1/2}; output probes are
+    J z with z = C^{1/2} ξ (ξ standard normal in the same coordinates).
     SVD → rows_in = ψ (Euclidean-orthonormal in whitened space).
 
-    AMOR then whitens inputs with C^{-1/2} before lift and uses Euclidean encode on ψ.
-    Equivalence: z = ψ^T C^{-1/2}(x-μ) = φ^T C^{-1}(x-μ) with φ = C^{1/2}ψ (Zahm option 2).
+    Callers convert to the dual-encoder form Φ = C^{1/2} ψ, E = Φᵀ C^{-1}
+    (Zahm option 2) and AMOR encodes with E without runtime whitening.
     """
     import os
 

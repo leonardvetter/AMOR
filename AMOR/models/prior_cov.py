@@ -104,6 +104,20 @@ class LowRankPriorCov:
         scale = np.sqrt(self.lam + eps) - sqrt_eps
         return sqrt_eps * x + self.V @ (scale * coef)
 
+    def apply_cinv(self, x: np.ndarray) -> np.ndarray:
+        """Exact C^{-1} x for C = V Λ V^T + ε I (V column-orthonormal).
+
+        C^{-1} = ε^{-1} I - V diag(λ_i / (ε (λ_i+ε))) V^T
+        """
+        x = np.asarray(x, dtype=np.float64).reshape(-1)
+        if x.size != self.dim:
+            raise ValueError(f"dim {x.size} != {self.dim}")
+        eps = float(self.jitter)
+        inv_eps = 1.0 / max(eps, 1e-30)
+        coef = self.V.T @ x
+        scale = self.lam / (eps * (self.lam + eps))
+        return inv_eps * x - self.V @ (scale * coef)
+
     def save_dict(self) -> dict:
         return {
             "cov_V": self.V.astype(np.float32),

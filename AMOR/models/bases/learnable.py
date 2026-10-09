@@ -1,9 +1,9 @@
 """Learnable orthonormal bases for AMOR blocks.
 
-Row-orthonormal (k, D) bases with encode/decode. With ``mass_diag`` the
-orthonormality and the encode inner product are M-weighted (Phi M Phi^T = I),
-which is what FEM meshes with a lumped nodal mass matrix require; without it
-both are Euclidean.
+Row-orthonormal (k, D) bases with encode/decode. With a mass matrix the
+orthonormality and the encode inner product are M-weighted (Φ M Φᵀ = I).
+``mass_matrix`` may be any SPD sparse/dense operator; a 1-d vector is treated
+as a lumped diagonal only as a fallback.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ class LearnableOrthonormalBasis(nn.Module):
         init_components: Optional[np.ndarray] = None,
         init_mean: Optional[np.ndarray] = None,
         mass_diag: Optional[np.ndarray] = None,
+        mass_matrix=None,
     ):
         super().__init__()
         self.dim = dim
@@ -33,7 +34,21 @@ class LearnableOrthonormalBasis(nn.Module):
             self.register_buffer("mean", torch.from_numpy(init_mean.astype(np.float32)))
         else:
             self.register_buffer("mean", torch.zeros(dim, dtype=torch.float32))
-        if mass_diag is not None:
+        # Prefer general sparse/dense M; keep lumped diag buffer only as fallback.
+        object.__setattr__(self, "_mass_sp", None)
+        if mass_matrix is not None:
+            import scipy.sparse as sp
+
+            M = mass_matrix
+            if not sp.issparse(M):
+                M = sp.csr_matrix(np.asarray(M, dtype=np.float64))
+            else:
+                M = M.tocsr()
+            object.__setattr__(self, "_mass_sp", M)
+            # Row-sum lumping stored for QR whitening init only when needed.
+            lump = np.asarray(M.sum(axis=1)).reshape(-1).astype(np.float32)
+            self.register_buffer("mass_diag", torch.from_numpy(lump))
+        elif mass_diag is not None:
             self.register_buffer(
                 "mass_diag",
                 torch.from_numpy(np.asarray(mass_diag, dtype=np.float32).reshape(-1)),
@@ -46,23 +61,39 @@ class LearnableOrthonormalBasis(nn.Module):
 
     def encode(self, x: torch.Tensor, d: int) -> torch.Tensor:
         c = self.components()
+        x_c = x - self.mean[:d]
+        M = getattr(self, "_mass_sp", None)
+        if M is not None:
+            xc = x_c.detach().cpu().numpy()
+            Md = M[:d, :d] if (M.shape[0] != d or M.shape[1] != d) else M
+            Mx = Md @ xc.T  # (d, B)
+            z = (c[:, :d].detach().cpu().numpy() @ Mx).T
+            return torch.from_numpy(np.asarray(z, dtype=np.float32)).to(
+                device=x.device, dtype=x.dtype
+            )
         if self.mass_diag is None:
-            return (x - self.mean[:d]) @ c[:, :d].T
+            return x_c @ c[:, :d].T
         w = self.mass_diag[:d]
-        return ((x - self.mean[:d]) * w.unsqueeze(0)) @ c[:, :d].transpose(0, 1)
+        return (x_c * w.unsqueeze(0)) @ c[:, :d].transpose(0, 1)
 
     def decode(self, z: torch.Tensor, d_out: int) -> torch.Tensor:
         c = self.components()
         return z @ c[:, :d_out] + self.mean[:d_out]
 
     def _qr_rows(self, raw: torch.Tensor) -> torch.Tensor:
-        """Orthonormal rows of ``raw``; M-orthonormal when mass weights are set.
+        """Orthonormal rows; M-orthonormal via Gram when a mass matrix is set."""
+        M = getattr(self, "_mass_sp", None)
+        if M is not None:
+            from AMOR.models.dis_dual import m_orthonormalize_rows_general
 
-        Mass case: QR of (R * sqrt(m)), then Phi = Q^T / sqrt(m) so Phi M Phi^T = I.
-        """
+            rows = raw.detach().cpu().numpy().astype(np.float64)
+            Md = M[: rows.shape[1], : rows.shape[1]]
+            out = m_orthonormalize_rows_general(rows, Md)
+            return torch.from_numpy(out.astype(np.float32)).to(device=raw.device, dtype=raw.dtype)
         if self.mass_diag is None:
             q, _ = torch.linalg.qr(raw.T, mode="reduced")
             return q.T
+        # Lumped-diag fallback (sqrt-whitened QR).
         sqrt_w = torch.sqrt(self.mass_diag[: raw.shape[1]].clamp(min=1e-30))
         q, _ = torch.linalg.qr((raw * sqrt_w).T, mode="reduced")
         return q.T / sqrt_w
@@ -84,8 +115,9 @@ class QROrthonormalBasis(LearnableOrthonormalBasis):
         init_components: Optional[np.ndarray] = None,
         init_mean: Optional[np.ndarray] = None,
         mass_diag: Optional[np.ndarray] = None,
+        mass_matrix=None,
     ):
-        super().__init__(dim, k, init_components, init_mean, mass_diag)
+        super().__init__(dim, k, init_components, init_mean, mass_diag, mass_matrix)
         if init_components is not None:
             raw = torch.from_numpy(init_components.astype(np.float32))
         else:
@@ -106,8 +138,9 @@ class CayleyOrthonormalBasis(LearnableOrthonormalBasis):
         init_components: Optional[np.ndarray] = None,
         init_mean: Optional[np.ndarray] = None,
         mass_diag: Optional[np.ndarray] = None,
+        mass_matrix=None,
     ):
-        super().__init__(dim, k, init_components, init_mean, mass_diag)
+        super().__init__(dim, k, init_components, init_mean, mass_diag, mass_matrix)
         if init_components is not None:
             raw = torch.from_numpy(init_components.astype(np.float32))
         else:
@@ -135,10 +168,11 @@ class SpanFrozenCayleyBasis(LearnableOrthonormalBasis):
         init_components: Optional[np.ndarray] = None,
         init_mean: Optional[np.ndarray] = None,
         mass_diag: Optional[np.ndarray] = None,
+        mass_matrix=None,
     ):
-        if mass_diag is not None:
+        if mass_diag is not None or mass_matrix is not None:
             raise ValueError("SpanFrozenCayleyBasis does not support mass weighting")
-        super().__init__(dim, k, init_components, init_mean, mass_diag)
+        super().__init__(dim, k, init_components, init_mean, mass_diag, mass_matrix)
         if init_components is None:
             raise ValueError("SpanFrozenCayleyBasis requires init_components")
         q, _ = np.linalg.qr(init_components.T.astype(np.float64), mode="reduced")
@@ -164,13 +198,22 @@ def make_learnable_basis(
     init_components: Optional[np.ndarray] = None,
     init_mean: Optional[np.ndarray] = None,
     mass_diag: Optional[np.ndarray] = None,
+    mass_matrix=None,
 ) -> LearnableOrthonormalBasis:
+    kw = dict(
+        dim=dim,
+        k=k,
+        init_components=init_components,
+        init_mean=init_mean,
+        mass_diag=mass_diag,
+        mass_matrix=mass_matrix,
+    )
     if param == "qr":
-        return QROrthonormalBasis(dim, k, init_components, init_mean, mass_diag)
+        return QROrthonormalBasis(**kw)
     if param == "cayley":
-        return CayleyOrthonormalBasis(dim, k, init_components, init_mean, mass_diag)
+        return CayleyOrthonormalBasis(**kw)
     if param in ("cayley_frozen", "qr_frozen"):
-        return SpanFrozenCayleyBasis(dim, k, init_components, init_mean, mass_diag)
+        return SpanFrozenCayleyBasis(**kw)
     raise ValueError(
         f"Unknown learnable basis param {param!r}; expected qr, cayley, cayley_frozen/qr_frozen"
     )

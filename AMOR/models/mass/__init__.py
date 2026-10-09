@@ -1,5 +1,17 @@
 """Mesh mass helpers for FEM nodal AMOR."""
 
-from .mesh_mass import lumped_nodal_mass, mass_diag_stacked
+from .mesh_mass import (
+    apply_mass,
+    consistent_nodal_mass,
+    lumped_nodal_mass,
+    mass_diag_stacked,
+    mass_kron_channels,
+)
 
-__all__ = ["lumped_nodal_mass", "mass_diag_stacked"]
+__all__ = [
+    "apply_mass",
+    "consistent_nodal_mass",
+    "lumped_nodal_mass",
+    "mass_diag_stacked",
+    "mass_kron_channels",
+]

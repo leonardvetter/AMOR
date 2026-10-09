@@ -59,6 +59,23 @@ def _learnable_param(basis_type: str) -> str:
     return basis_type.replace("learned_", "")
 
 
+@torch.no_grad()
+def _infer_ms(model, loader, device) -> float:
+    model.eval()
+    xb = next(iter(loader))[0].to(device)
+    bs = xb.size(0)
+    for _ in range(2):
+        model(xb)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    t0 = time.time()
+    for _ in range(5):
+        model(xb)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    return (time.time() - t0) / (5 * bs) * 1000.0
+
+
 def _normalize_basis_type(basis_type: str) -> str:
     if basis_type == "pca_increment":
         return "pca"
@@ -150,6 +167,13 @@ def main():
     parser.add_argument("--k_out", type=int, default=100)
     parser.add_argument("--width", type=int, default=24)
     parser.add_argument("--layers", type=int, default=4)
+    parser.add_argument(
+        "--use_factorized_weights",
+        choices=("auto", "true", "false"),
+        default="auto",
+        help="Factorized T (default auto).",
+    )
+    parser.add_argument("--tag", default=None, help="Filename tag override")
     parser.add_argument("--use_coordinates", action="store_true")
     parser.add_argument(
         "--basis_type",
@@ -187,7 +211,7 @@ def main():
         args.checkpoint_dir = expand("${AMOR_DATA_ROOT}/checkpoints/kolmogorov_re40_basis")
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
-    label = args.basis_type
+    label = args.tag or args.basis_type
     metrics_path = os.path.join(args.checkpoint_dir, f"amor_Re40_{label}_metrics.json")
     if args.skip_if_exists and os.path.isfile(metrics_path):
         print(f"Skip: {metrics_path} exists")
@@ -261,6 +285,7 @@ def main():
     print(f"k_in={k_in}, k_out={k_out}")
 
     learned = _is_learned(args.basis_type)
+    fact = {"auto": "auto", "true": True, "false": False}[args.use_factorized_weights]
     model = AMOR(
         width=args.width,
         rb=rb,
@@ -271,18 +296,20 @@ def main():
         init_scale=0.7,
         use_skip_connections=True,
         use_batch_norm=False,
-        use_coordinates=args.use_coordinates,
+        use_coordinates=False,
         add_constant_mode=False,
-        use_factorized_weights=False,
+        use_factorized_weights=fact,
         trainable_basis=learned,
         trainable_basis_param=_learnable_param(args.basis_type) if learned else "qr",
+        share_bases=not learned,
     )
 
     print("\n" + "=" * 70)
     print("TRAINING AMOR")
     print("=" * 70)
     params = sum(p.numel() for p in model.parameters())
-    print(f"Parameters: {params:,}")
+    n_blocks = model.n_nonlocal_blocks()
+    print(f"Parameters: {params:,}  blocks={n_blocks}")
 
     t0 = time.time()
     learned = _is_learned(args.basis_type)
@@ -303,6 +330,7 @@ def main():
     train_rel_l1, train_rel_l2 = compute_rel_metrics_normalized(model, train_loader, device, dt=args.dt)
     val_rel_l1, val_rel_l2 = compute_rel_metrics_normalized(model, val_loader, device, dt=args.dt)
     test_rel_l1, test_rel_l2 = compute_rel_metrics(model, test_loader, device, xy_mean, xy_std, dt=args.dt)
+    infer_ms = _infer_ms(model, test_loader, device)
 
     print(f"Train rel_l1_normalized: {train_rel_l1:.6f}, Train rel_l2: {train_rel_l2:.6f}")
     print(f"Val rel_l1_normalized: {val_rel_l1:.6f}, Val rel_l2: {val_rel_l2:.6f}")
@@ -342,6 +370,8 @@ def main():
         "k_out": k_out,
         "width": args.width,
         "layers": args.layers,
+        "n_blocks": n_blocks,
+        "num_params": params,
         "batch_size": args.batch_size,
         "epochs_ran": epochs_ran,
         "best_epoch": best_epoch,
@@ -353,6 +383,7 @@ def main():
         "test_rel_l1": test_rel_l1,
         "test_rel_l2": test_rel_l2,
         "training_time_sec": training_time,
+        "inference_ms_per_sample": infer_ms,
         "total_wall_sec": time.time() - t0,
     }
     with open(metrics_path, "w", encoding="utf-8") as f:

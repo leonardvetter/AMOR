@@ -272,6 +272,7 @@ def main():
                 out_channels=1,
                 width=HYPERPARAMETERS['width'],
                 modes=HYPERPARAMETERS['fno_modes'],
+                n_layers=HYPERPARAMETERS['layers'],
             )
 
         def make_pcanet():

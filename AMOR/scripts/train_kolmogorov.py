@@ -92,7 +92,7 @@ def parse_args():
     parser.add_argument("--pca_fit_samples", type=int, default=0,
                         help="Number of training samples used to fit the PCA basis (0 = all)")
     parser.add_argument("--use_coordinates", action="store_true",
-                        help="AMOR: pass use_coordinates=True")
+                        help=argparse.SUPPRESS)  # kept off; not used in reported runs
     parser.add_argument("--fno_add_coords", action="store_true",
                         help="FNO: pass add_coords=True (coordinate channels in lift)")
     args = parser.parse_args()
@@ -162,7 +162,7 @@ def build_models(args, rb, k_in, k_out):
                 init_scale=0.7,
                 use_skip_connections=True,
                 use_batch_norm=False,
-                use_coordinates=args.use_coordinates,
+                use_coordinates=False,
                 add_constant_mode=False,
                 use_factorized_weights=False,
             )

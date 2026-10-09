@@ -5,7 +5,7 @@ Datasets
   cantilever_tip  mass-PCA, scalar-load FiLM, optional mesh bases
   bcfield         Euclidean PCA from a precomputed --pca_npz bundle
 
-Tip defaults match the published easy-10k mass-PCA protocol (coords + FiLM on).
+Tip defaults: mass-PCA, FiLM on, coordinates off, batch-norm off.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ from AMOR.paths import expand  # noqa: E402
 from AMOR.training.slurm import eval_deadline_walltime  # noqa: E402
 
 LEARNED = ("learned_qr", "learned_cayley")
-FIXED = ("pca", "chebyshev", "legendre", "jacobi", "laplacian")
+FIXED = ("pca", "chebyshev", "legendre", "jacobi", "laplacian", "dis")
 ALL_BASES = FIXED + LEARNED
 
 TIP_DATA = expand("${AMOR_DATA_ROOT}/aircraft_rib/datasets/aircraft_rib_cantilever_tip.npz")
@@ -258,16 +258,86 @@ def _loader_for_indices(xn, yn, film, idx, batch_size, shuffle=False):
     )
 
 
-def fit_tip_basis(bt, xtr4, ytr4, nodes, elems, mass_nodes, k_in, k_out, seed):
+def fit_tip_basis(bt, xtr4, ytr4, nodes, elems, mass_nodes, k_in, k_out, seed, dis_rows_path=None):
     k_out_pca = max(k_in, k_out)
+    if bt == "dis":
+        from AMOR.models.dis_dual import assert_dual, encoder_from_cinv, phi_from_psi
+        from AMOR.models.prior_cov import LowRankPriorCov
+        if not dis_rows_path:
+            raise SystemExit("tip --basis_type dis requires --dis_rows_path")
+        d = np.load(dis_rows_path, allow_pickle=True)
+        ns, c_in, n_nodes, _ = xtr4.shape
+        c_out = ytr4.shape[1]
+        x_mean = xtr4.reshape(ns, -1).mean(0)
+        y_mean = ytr4.reshape(ns, -1).mean(0)
+        rows_in = np.asarray(d["rows_in"], dtype=np.float64)
+        rows_out = np.asarray(d["rows_out"], dtype=np.float64)
+        k_in_eff = min(int(k_in), rows_in.shape[0])
+        k_out_eff = min(int(k_out), rows_out.shape[0])
+        if "rows_enc_in" in d.files:
+            E = np.asarray(d["rows_enc_in"][:k_in_eff], dtype=np.float64)
+            Phi = rows_in[:k_in_eff]
+        elif "cov_V" in d.files:
+            cov = LowRankPriorCov.from_save_dict(d)
+            k_in_eff = min(k_in_eff, int(cov.rank))
+            # Detect ψ (≈Euclidean ortho) vs already-Φ.
+            G = rows_in[:k_in_eff] @ rows_in[:k_in_eff].T
+            if np.linalg.norm(G - np.eye(k_in_eff)) < 0.1:
+                Phi = phi_from_psi(rows_in[:k_in_eff], cov)
+            else:
+                Phi = rows_in[:k_in_eff]
+            E = encoder_from_cinv(Phi, cov)
+        else:
+            Phi, E = rows_in[:k_in_eff], rows_in[:k_in_eff]
+        assert_dual(E, Phi, name="tip DIS_in")
+        # Output: M-orthonormal Φ_out + M-adjoint encoder E_out = Φᵀ M (precomputed
+        # as rows). Input stays C^{-1}-dual (not mass). Global mass=False; both
+        # sides use encoder_components_.
+        from AMOR.models.dis_dual import m_adjoint_encoder_rows, m_orthonormalize_rows_general
+        from AMOR.models.mass.mesh_mass import consistent_nodal_mass, mass_kron_channels
+
+        M_nodes = consistent_nodal_mass(nodes, elems)
+        M_out = mass_kron_channels(M_nodes, c_out)
+        Phi_out = m_orthonormalize_rows_general(rows_out[:k_out_eff], M_out)
+        E_out = m_adjoint_encoder_rows(Phi_out, M_out)
+        assert_dual(E_out, Phi_out, name="tip DIS_out M-adjoint", atol=1e-2)
+
+        rb = PCAReducerMultiChannel()
+        rb.n_channels, rb.out_channels = c_in, c_out
+        rb.shape_, rb.output_shape_ = (n_nodes, 1), (c_out, n_nodes, 1)
+
+        class _V:
+            pass
+
+        pin, pout = _V(), _V()
+        pin.mean_ = x_mean.astype(np.float32)
+        pin.components_ = Phi.astype(np.float32)
+        pin.encoder_components_ = E.astype(np.float32)
+        pin.n_components_ = int(Phi.shape[0])
+        pin.explained_variance_ratio_ = np.ones(pin.n_components_, np.float32) / pin.n_components_
+        pout.mean_ = y_mean.astype(np.float32)
+        pout.components_ = Phi_out.astype(np.float32)
+        pout.encoder_components_ = E_out.astype(np.float32)
+        pout.n_components_ = int(pout.components_.shape[0])
+        pout.explained_variance_ratio_ = np.ones(pout.n_components_, np.float32) / pout.n_components_
+        rb.pca_in, rb.pca_out = pin, pout
+        rb.basis_type = "dis"
+        print(
+            f"tip DIS: in Cinv-dual k={pin.n_components_}; "
+            f"out M-adjoint (consistent P1) k={pout.n_components_}",
+            flush=True,
+        )
+        return rb
     if bt in LEARNED:
         return fit_random_init_basis_mass(
             xtr4, ytr4, mass_nodes, random_state=seed,
             n_components_in=k_in, n_components_out=k_out,
+            nodes=nodes, elements=elems,
         )
     if bt == "pca":
+        # Consistent P1 mass (sparse); no diagonal-M assumption in the fit/encode path.
         return PCAReducerMultiChannelMass(svd_solver="randomized", random_state=seed).fit(
-            xtr4, ytr4, mass_nodes=mass_nodes, k_in=k_in, k_out=k_out_pca,
+            xtr4, ytr4, k_in=k_in, k_out=k_out_pca, nodes=nodes, elements=elems,
         )
     return fit_mesh_alternative_basis_mass(
         xtr4, ytr4, bt, nodes=nodes, elements=elems, mass_nodes=mass_nodes,
@@ -310,7 +380,7 @@ def _run_tip(args, device, eval_deadline_ts):
     s = x.shape[0]
     nodes = np.asarray(d["nodes"], dtype=np.float64)
     elems = np.asarray(d["elements"], dtype=np.int64)
-    mass_nodes = lumped_nodal_mass(nodes, elems)
+    mass_nodes = lumped_nodal_mass(nodes, elems)  # legacy diag for alt bases / ckpt metadata
     print(
         f"samples={s} nodes={x.shape[2]} in_ch={x.shape[1]} out_ch={y.shape[1]} "
         f"basis={args.basis_type}",
@@ -332,21 +402,26 @@ def _run_tip(args, device, eval_deadline_ts):
     rb = fit_tip_basis(
         args.basis_type, xtr4, ytr4, nodes, elems, mass_nodes,
         args.k_in, args.k_out, args.seed,
+        dis_rows_path=getattr(args, "dis_rows_path", None),
     )
     k_in = min(args.k_in, rb.pca_in.n_components_)
     k_out = min(args.k_out, rb.pca_out.n_components_)
     print(f"rank clamp k_in={k_in} k_out={k_out}", flush=True)
 
     learned = args.basis_type in LEARNED
-    use_coords = not args.no_coordinates
     use_film = not args.no_film_conditioning
+    fact = getattr(args, "use_factorized_weights", "auto")
+    if isinstance(fact, str):
+        fact = {"auto": "auto", "true": True, "false": False}.get(fact, fact)
     model = AMOR(
         width=args.width, rb=rb, k_in=k_in, k_out=k_out, layers=args.layers,
         dropout=args.dropout, init_scale=args.init_scale, use_skip_connections=True,
-        use_batch_norm=False, use_coordinates=use_coords,
+        use_batch_norm=False, use_coordinates=False,
+        use_factorized_weights=fact,
         use_film_conditioning=use_film, film_hidden=args.film_hidden,
         trainable_basis=learned,
         trainable_basis_param=args.basis_type.replace("learned_", "") if learned else "qr",
+        share_bases=not learned,
     )
     print(f"params={sum(p.numel() for p in model.parameters()):,}", flush=True)
 
@@ -376,7 +451,7 @@ def _run_tip(args, device, eval_deadline_ts):
             "trainable_basis": learned,
             "trainable_basis_param": args.basis_type.replace("learned_", "") if learned else None,
             "use_mass_weighted_pca": True,
-            "use_coordinates": use_coords,
+            "use_coordinates": False,
             "use_film_conditioning": use_film,
             "use_solve_ok_only": bool(args.use_solve_ok_only),
             "k_in": k_in,
@@ -425,7 +500,7 @@ def _run_tip(args, device, eval_deadline_ts):
                 "data_path": args.data_path,
                 "stopped_by_slurm_time_budget": stopped,
                 "time_buffer_sec": float(args.time_buffer_sec),
-                "use_coordinates": use_coords,
+                "use_coordinates": False,
                 "use_film_conditioning": use_film,
                 "film_hidden": int(args.film_hidden),
                 "init_scale": float(args.init_scale),
@@ -468,7 +543,7 @@ def _run_tip(args, device, eval_deadline_ts):
             "k_out": int(k_out),
             "width": int(args.width),
             "layers": int(args.layers),
-            "use_coordinates": use_coords,
+            "use_coordinates": False,
             "use_film_conditioning": use_film,
             "film_hidden": int(args.film_hidden),
             "use_mass_weighted_pca": True,
@@ -630,6 +705,7 @@ def main() -> None:
     p.add_argument("--data_path", type=str, default=None)
     p.add_argument("--checkpoint_dir", type=str, default=None)
     p.add_argument("--basis_type", choices=ALL_BASES, default="pca", help="tip only")
+    p.add_argument("--dis_rows_path", type=str, default=None, help="tip DIS rows npz (dual-encoder)")
     p.add_argument("--tag", default=None, help="tip basis-sweep filename tag (default: basis_type)")
     p.add_argument("--skip_if_exists", action="store_true", help="tip basis-sweep: skip if metrics json exists")
     p.add_argument("--pca_npz", type=str, default=None, help="bcfield: bundle from fit_aircraft_rib_bcfield_pca.py")
@@ -644,6 +720,12 @@ def main() -> None:
     p.add_argument("--val_frac", type=float, default=0.2)
     p.add_argument("--width", type=int, default=None)
     p.add_argument("--layers", type=int, default=None)
+    p.add_argument(
+        "--use_factorized_weights",
+        choices=("auto", "true", "false"),
+        default="auto",
+        help="Factorized T (default auto).",
+    )
     p.add_argument("--k_in", type=int, default=None)
     p.add_argument("--k_out", type=int, default=None)
     p.add_argument("--dropout", type=float, default=0.0)
@@ -652,10 +734,10 @@ def main() -> None:
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--time_buffer_sec", type=float, default=None)
     p.add_argument("--use_solve_ok_only", action="store_true", default=None)
-    p.add_argument("--no_coordinates", action="store_true", help="tip: disable coordinate channels")
     p.add_argument("--no_film_conditioning", action="store_true", help="tip: disable FiLM")
-    # Accepted for older tip CLIs; tip protocol enables coords/FiLM by default.
+    # Accepted for older tip CLIs (coords always off; FiLM on unless --no_film_conditioning).
     p.add_argument("--use_coordinates", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--no_coordinates", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--use_film_conditioning", action="store_true", help=argparse.SUPPRESS)
     args = p.parse_args()
 

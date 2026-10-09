@@ -65,7 +65,7 @@ After downloading Zenodo into `$AMOR_DATA_ROOT`, the trainers expect names such 
 
 ## Reproduce paper experiments
 
-On structured 2D benchmarks, AMOR and PCANet use `k_in = k_out = 144` and FNO uses `12×12` Fourier modes unless a trainer overrides them. Width and depth follow each script (SI model table). Reported `test_rel_l1` / `test_rel_l2` are relative errors in physical units after undoing the train-set z-score.
+On structured 2D benchmarks, AMOR and PCANet use `k_in = k_out = 144` and FNO uses `12×12` Fourier modes unless a trainer overrides them. Width and depth follow each script (SI model table). AMOR `layers` is the **total** number of nonlocal blocks including the input→output transition (`block0` + transition + `layers-2` output residual blocks). Reported `test_rel_l1` / `test_rel_l2` are relative errors in physical units after undoing the train-set z-score.
 
 | Experiment | Command |
 |---|---|
@@ -84,11 +84,11 @@ On structured 2D benchmarks, AMOR and PCANet use `k_in = k_out = 144` and FNO us
 | Mesh generalization | `python AMOR/mesh_generalization/run_mesh_generalization.py` |
 | Data efficiency | `python AMOR/data_efficiency/train_*.py` |
 
-`train_kolmogorov.py` stores the published per-Reynolds width, depth, and PCA SVD solver in `RE_DEFAULTS`. Rib tip defaults enable coordinates and FiLM (paper tip protocol); pass `--no_coordinates` / `--no_film_conditioning` only if you intentionally disable them.
+`train_kolmogorov.py` stores the published per-Reynolds width, depth, and PCA SVD solver in `RE_DEFAULTS`. All trainers keep `use_coordinates=False` and `use_batch_norm=False`. Rib tip defaults enable FiLM; pass `--no_film_conditioning` only if you intentionally disable it.
 
 ### Aircraft-rib mass weighting
 
-`--dataset cantilever_tip` builds a lumped nodal mass from `nodes` / `elements`, fits `PCAReducerMultiChannelMass` (PCA in the M-weighted inner product), and encodes with `(x-μ)⊙m` against those modes. `--dataset bcfield` uses Euclidean `PCAReducerMultiChannel` from a precomputed `--pca_npz` bundle (no mass matrix).
+`--dataset cantilever_tip` assembles the consistent P1 mass from `nodes` / `elements`, fits `PCAReducerMultiChannelMass` in that inner product, and encodes with `z = Φᵀ M (x−μ)` (the M-adjoint rows, not a diagonal multiply). Mesh transfer keeps `B = (P Φ)ᵀ` and sets `E = G^{-1}(B M)` with the same consistent mass on the target mesh (`evaluate_aircraft_rib_mass_generalization.py --dual_mode paper --mass_kind consistent`). `--dataset bcfield` uses Euclidean `PCAReducerMultiChannel` from a precomputed `--pca_npz` bundle (no mass matrix).
 
 ## Recreate datasets
 

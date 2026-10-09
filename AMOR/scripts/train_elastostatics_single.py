@@ -235,7 +235,8 @@ def main():
     else:
         model = build_out
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Parameters: {n_params:,}")
+    n_blocks = model.n_nonlocal_blocks() if hasattr(model, "n_nonlocal_blocks") else None
+    print(f"Parameters: {n_params:,}  blocks={n_blocks}")
 
     xb, yb = next(iter(loaders["train"]))
     xb, yb = xb.to(device), yb.to(device)
@@ -291,7 +292,7 @@ def main():
             for xb, yb in loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
-                l1, l2 = relative_field_errors(pred, yb)
+                l1, l2 = relative_field_errors(pred, yb, y_mean, y_std)
                 rel_l1.append(l1)
                 rel_l2.append(l2)
         metrics[f"{split_name}_rel_l1"] = float(np.mean(rel_l1))
@@ -332,6 +333,7 @@ def main():
         "error_space": "original_units",
         "hyperparameters": hyperparams,
         "num_params": n_params,
+        "n_blocks": n_blocks,
         "best_val_l1": float(best_val),
         "best_epoch": int(best_epoch + 1),
         "training_time_s": elapsed,
