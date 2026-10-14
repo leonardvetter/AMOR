@@ -10,7 +10,7 @@
 #SBATCH --array=0-9
 #SBATCH --output=slurm-%x-%A_%a.out
 # AMOR on Geo-FNO airfoil (array tasks 0-4) and elasticity (5-9); task t -> seed t%5. Each task trains
-# 300 epochs and writes $OUT_DIR/results/<dataset>_seed<S>.json (finished tasks are skipped on resubmission).
+# 500 epochs and writes $OUT_DIR/results/<dataset>_seed<S>.json (finished tasks are skipped on resubmission).
 # Submit from the repo root:   sbatch AMOR/Geo-FNO_benchmark/slurm/array.sh
 # Subset of tasks:             sbatch --array=0,5 AMOR/Geo-FNO_benchmark/slurm/array.sh
 ENVF="${REPO_DIR:-$SLURM_SUBMIT_DIR}/AMOR/Geo-FNO_benchmark/slurm/_env.sh"  # Slurm runs a spooled copy of this script
