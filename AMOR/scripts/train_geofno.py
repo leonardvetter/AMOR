@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """AMOR on the Geo-FNO airfoil / elasticity benchmarks (Table tab:irregular), one (dataset, seed) per call.
 
-Protocol (AMOR.tex, "Model configurations and training", and SI configuration table):
+Protocol:
   published split 1000 train / 200 test; Z-score (inputs per node and channel, outputs per channel) and reduced bases
   fit on the train split only;
   mass-weighted PCA with the lumped node mass of the mesh, (k_in, k_out) from 99.9% explained variance;
@@ -11,8 +11,8 @@ Protocol (AMOR.tex, "Model configurations and training", and SI configuration ta
 Errors: mean per-sample relative L1 / L2 of the physical fields on the 200 test samples, in percent.
 Seeds vary the model initialisation and the batch order (the split is the published one).
 
-    python AMOR/Geo-FNO_benchmark/run_geofno.py --dataset airfoil --seed 0
-    python AMOR/Geo-FNO_benchmark/run_geofno.py --smoke          # both datasets, few epochs, tiny train set
+    python AMOR/scripts/train_geofno.py --dataset airfoil --seed 0 --data-dir /path/to/parent
+    python AMOR/scripts/train_geofno.py --smoke
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import numpy as np
 import scipy
@@ -39,11 +38,13 @@ import sklearn
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-import data as gdata
+from AMOR.data import geofno as gdata
 from AMOR.models.amor import AMOR
 from AMOR.models.PCAReducer import PCAReducerMultiChannelMass
 from AMOR.training.loop2d import train_model
 
+# --data-dir overrides this. AMOR_DATA_DIR is the env override. The fallback is
+# <repo>/AMOR/data, which is not AMOR_DATA_ROOT.
 DEFAULT_DATA = Path(os.environ.get("AMOR_DATA_DIR", REPO_ROOT / "AMOR" / "data"))
 DEFAULT_OUT = REPO_ROOT / "experiments_out" / "geofno"
 
@@ -200,7 +201,13 @@ def main():
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--n-train", type=int, default=None, help="debug: use only the first n training samples")
     ap.add_argument("--smoke", action="store_true", help="3 epochs, 200 training samples, writes to <out>_smoke")
-    ap.add_argument("--data-dir", type=Path, default=DEFAULT_DATA)
+    ap.add_argument(
+        "--data-dir",
+        type=Path,
+        default=DEFAULT_DATA,
+        help="directory that contains Airfoil_dataset/ and Elasticity_dataset/ "
+        "(default: $AMOR_DATA_DIR, else <repo>/AMOR/data)",
+    )
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--force", action="store_true")

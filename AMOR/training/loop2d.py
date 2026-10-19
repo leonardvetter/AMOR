@@ -1,4 +1,4 @@
-"""Training loop shared by the 2D field-to-field trainers (Helmholtz, nonlinear diffusion).
+"""Training loop shared by the 2D field-to-field trainers and the Geo-FNO trainer.
 
 AdamW + CosineAnnealingLR, L1 objective, gradient clipping, early stopping on
 validation loss. Best weights are kept in memory and restored at the end.

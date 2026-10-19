@@ -1,3 +1,7 @@
+"""PCA reducers for multi-channel grid and mesh fields, including mass-weighted PCA.
+
+Paths to arrays are supplied by the caller. This module does not open a default data directory.
+"""
 import json
 import os
 import numpy as np

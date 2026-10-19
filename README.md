@@ -25,7 +25,6 @@ AMOR/
   scripts/              # train / eval / fit / timing entry points
   data_efficiency/      # two-stage memory-efficiency experiment
   mesh_generalization/  # resolution-transfer experiment
-  Geo-FNO_benchmark/    # airfoil and elasticity; own data.py, runner, and slurm
 ```
 
 Scripts put the repository root on `sys.path`. From any working directory:
@@ -50,6 +49,7 @@ Helmholtz generation also needs hippylib / hippyflow (`HIPPYLIB_PATH`, `HIPPYFLO
 | Variable | Default | Role |
 |---|---|---|
 | `AMOR_DATA_ROOT` | `~/data` | Zenodo downloads and paper arrays |
+| `AMOR_DATA_DIR` | `<repo>/AMOR/data` | Geo-FNO parent directory (`Airfoil_dataset/`, `Elasticity_dataset/`). `--data-dir` overrides it. |
 | `AMOR_SCRATCH_DATA` | same as `AMOR_DATA_ROOT` | large intermediates / results |
 | `AMOR_MESHES_DIR` | `$AMOR_DATA_ROOT/meshes_3d` | rib mesh NPZs |
 | `AMOR_RIB_DATASETS` | `$AMOR_DATA_ROOT/aircraft_rib/datasets` | rib NPZs |
@@ -83,7 +83,7 @@ On structured 2D benchmarks, AMOR and PCANet use `k_in = k_out = 144` and FNO us
 | Rib bcfield / mixed | `python AMOR/scripts/fit_aircraft_rib_bcfield_pca.py --data_path …` then `train_amor_aircraft_rib.py --dataset bcfield --data_path … --checkpoint_dir … --pca_npz …` |
 | Mesh generalization | `python AMOR/mesh_generalization/run_mesh_generalization.py` |
 | Data efficiency | `python AMOR/data_efficiency/run_memory_efficiency.py` |
-| Geo-FNO airfoil / elasticity | `python AMOR/Geo-FNO_benchmark/run_geofno.py --dataset {airfoil,elasticity} --seed 0` |
+| Geo-FNO airfoil / elasticity | `python AMOR/scripts/train_geofno.py --dataset {airfoil,elasticity} --seed 0 --data-dir /path/to/parent` |
 
 `train_kolmogorov.py` stores the published per-Reynolds width, depth, and PCA SVD solver in `RE_DEFAULTS`. All trainers keep `use_coordinates=False` and `use_batch_norm=False`. Rib tip defaults enable FiLM; pass `--no_film_conditioning` only if you intentionally disable it.
 
@@ -154,16 +154,22 @@ assert pred.shape == (8, 1, 32, 32)
 
 For a mass-weighted mesh problem, fit `PCAReducerMultiChannelMass` and call `AMOR(..., mass=True)` (or rely on the reducer: mass is inferred when `rb` exposes `encoder_mass_diag`). For FiLM, pass `use_film_conditioning=True` and `model(x, film_cond)`.
 
-Training schedules in the paper scripts are AdamW \(2\cdot10^{-3}\), weight decay \(10^{-4}\), grad clip \(3\), cosine annealing, relative \(L^1\). Reusable loops: `AMOR/training/loop2d.py` (field-to-field 2D), `loop3d.py` (3D), `loop_timestep.py` (Euler step).
+Training schedules in the structured-grid scripts are AdamW \(2\cdot10^{-3}\), weight decay \(10^{-4}\), grad clip \(3\), cosine annealing, relative \(L^1\). The Geo-FNO script uses the same optimizer settings and relative \(L^2\). Reusable loops: `AMOR/training/loop2d.py` (field-to-field 2D and Geo-FNO), `loop3d.py` (3D), `loop_timestep.py` (Euler step).
 
 ## Citation
 
-If you use this code, please cite the AMOR paper and this repository. If you use a dataset, please also cite that dataset.
+If you use this code, please cite the paper and this repository. If you use a dataset, please also cite that dataset.
 
-Geo-FNO airfoil and elasticity are trained only by `AMOR/Geo-FNO_benchmark/run_geofno.py`: published 1000/200 split, no validation split, relative L2, batch size 20, 500 epochs, final epoch, width `floor(k_out/2)`, 6 blocks (airfoil) and 4 blocks (elasticity). Data directory is `AMOR_DATA_DIR` (default `<repo>/AMOR/data`, with `Airfoil_dataset/` and `Elasticity_dataset/` inside it). The Slurm scripts read `DATA_DIR` and `OUT_DIR` from `slurm/_env.sh`.
+Geo-FNO airfoil and elasticity are trained by `AMOR/scripts/train_geofno.py`. The protocol is the published 1000/200 split, no validation split, relative L2, batch size 20, 500 epochs, the final epoch, width `floor(k_out/2)`, 6 blocks (airfoil) and 4 blocks (elasticity). `--data-dir` is the directory that contains `Airfoil_dataset/` and `Elasticity_dataset/`. If omitted, the script uses `AMOR_DATA_DIR`, then `<repo>/AMOR/data`. That fallback is not `AMOR_DATA_ROOT`. `--out-dir` defaults to `experiments_out/geofno`. `aggregate_geofno.py` and `make_geofno_figures.py` read that output directory.
 
 ```bibtex
-@software{voderholzer2026amor,
+@article{voderholzer2026amor,
+  author  = {Voderholzer, David and Vetter, Leonard and O'Leary-Roseberry, Thomas},
+  title   = {{AMOR}: Adaptive Modal Operator Refinement for Operator Learning on Arbitrary Meshes and Irregular {3D} Geometries},
+  journal = {Computer Methods in Applied Mechanics and Engineering},
+  note    = {Draft. The paper source sets this title and this journal. It does not state a year or a DOI.}
+}
+@software{voderholzer2026amor_code,
   author       = {Voderholzer, David and Vetter, Leonard and O'Leary-Roseberry, Thomas},
   title        = {Adaptive Modal Operator Refinement ({AMOR})},
   year         = {2026},

@@ -5,7 +5,7 @@ Two random test samples per dataset (fixed RandomState(0)), predictions of the c
 <out-dir>/figures/{airfoil,elasticity}_sample_visualization.{png,pdf}. The error panel shows
 |pred - truth| / max|truth| (maximum over the sample's nodes) pointwise.
 
-Usage: python AMOR/Geo-FNO_benchmark/make_figures.py [--seed 0] [--out-dir DIR] [--data-dir DIR]
+Usage: python AMOR/scripts/make_geofno_figures.py [--seed 0] [--out-dir DIR] [--data-dir DIR]
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(REPO_ROOT))
 
 import matplotlib
 
@@ -24,7 +24,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-import data as gdata
+from AMOR.data import geofno as gdata
 
 AIRFOIL_CROP = (40, 20)  # drop the first/last 40 circumferential and keep 20 radial rows, as in the SI figure
 
@@ -67,6 +67,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out-dir", type=Path, default=REPO_ROOT / "experiments_out" / "geofno")
+    # Same default as train_geofno.py: --data-dir, else AMOR_DATA_DIR, else <repo>/AMOR/data.
     ap.add_argument("--data-dir", type=Path, default=Path(os.environ.get("AMOR_DATA_DIR", REPO_ROOT / "AMOR" / "data")))
     ap.add_argument("--dataset", nargs="+", default=["airfoil", "elasticity"])
     a = ap.parse_args()

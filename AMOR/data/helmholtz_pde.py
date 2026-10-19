@@ -1,4 +1,7 @@
+"""2D Helmholtz PDE residual used by the dataset generator.
 
+hippyflow / hippylib are imported from HIPPYLIB_PATH and HIPPYFLOW_PATH when those variables are set.
+"""
 import sys
 from pathlib import Path
 
