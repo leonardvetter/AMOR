@@ -66,7 +66,7 @@ from AMOR.training.loop3d import (
     set_seed,
     train_model,
 )
-from AMOR.datasets.flowbench3d import (
+from AMOR.data.flowbench3d import (
     DEFAULT_DATA_DIR,
     DEFAULT_RESULTS_DIR,
     compute_norm_stats,
@@ -194,6 +194,7 @@ def parse_args():
     p.add_argument("--k-in", type=int, default=None, help="Fixed AMOR input PCA modes")
     p.add_argument("--k-out", type=int, default=None, help="Fixed AMOR output PCA modes")
     p.add_argument("--run-tag", default=None, help="Suffix for result/log filenames (e.g. k150_k20)")
+    p.add_argument("--seed", type=int, default=None, help="Weight seed. The geometry split stays at 42.")
     p.add_argument(
         "--resume-from",
         default=None,
@@ -222,6 +223,23 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=False,
         help="periodic grid Laplacian (default Dirichlet, better for LDC walls)",
+    )
+    p.add_argument(
+        "--amp",
+        choices=["bf16"],
+        default=None,
+        help="Training autocast. bf16 does not use a GradScaler. Eval stays fp32.",
+    )
+    p.add_argument(
+        "--no-block-checkpoint",
+        action="store_true",
+        help="Keep block activations (faster). Default recomputes them to save GPU memory.",
+    )
+    p.add_argument(
+        "--probe-batches",
+        type=int,
+        default=0,
+        help="Run this many training batches, print peak GPU memory, and exit.",
     )
     return p.parse_args()
 
@@ -256,6 +274,8 @@ def main():
         hyperparams["early_stopping_patience"] = args.patience
     if args.batch_size is not None:
         hyperparams["batch_size"] = args.batch_size
+    if args.seed is not None:
+        hyperparams["seed"] = int(args.seed)
     if args.k_in is not None:
         hyperparams["k_in"] = args.k_in
     if args.k_out is not None:
@@ -270,6 +290,13 @@ def main():
         hyperparams["use_factorized_weights_auto_threshold"] = args.factorized_threshold
     hyperparams["basis_type"] = args.basis_type
     hyperparams["laplacian_periodic"] = bool(args.laplacian_periodic)
+    if args.amp is not None:
+        hyperparams["amp"] = args.amp
+    if args.no_block_checkpoint:
+        os.environ["AMOR_BLOCK_CHECKPOINT"] = "0"
+    if args.probe_batches:
+        hyperparams["probe_batches"] = int(args.probe_batches)
+        hyperparams["epochs"] = 1
     if args.basis_type == "learned_qr":
         # Full QR_(k,D) OOM at 128³; learn Cayley rotation of frozen Laplacian span.
         hyperparams["trainable_basis"] = True
@@ -291,11 +318,12 @@ def main():
 
     os.makedirs(args.results_dir, exist_ok=True)
     result_path = os.path.join(args.results_dir, f"{file_stem}_results.json")
-    if os.path.exists(result_path) and not args.dry_run:
+    from AMOR.training.protocol_timing import protocol_requested
+    if os.path.exists(result_path) and not args.dry_run and not protocol_requested():
         print(f"Result exists: {result_path}\nDelete to re-run.")
         sys.exit(0)
 
-    set_seed(hyperparams["seed"])
+    from AMOR.data.splits import apply_weight_seed, shuffle_generator
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     wall_start = time.time()
@@ -311,7 +339,7 @@ def main():
         geom,
         train_frac=hyperparams["train_frac"],
         val_frac=hyperparams["val_frac"],
-        seed=hyperparams["seed"],
+        seed=int(hyperparams["seed"]),
     )
     print_training_summary(args, split, x_mmap, y_mmap, hyperparams)
 
@@ -327,7 +355,8 @@ def main():
     )
 
     loaders = make_dataloaders(
-        x_mmap, y_mmap, split, norm, hyperparams["batch_size"], hyperparams["num_workers"]
+        x_mmap, y_mmap, split, norm, hyperparams["batch_size"], hyperparams["num_workers"],
+        generator=shuffle_generator(int(hyperparams["seed"])),
     )
 
     rb = None
@@ -367,7 +396,7 @@ def main():
                     int(k_in_fixed),
                     int(k_out_fixed),
                     laplacian_periodic=hyperparams["laplacian_periodic"],
-                    random_state=hyperparams["seed"],
+                    random_state=int(hyperparams["seed"]),
                 )
                 rb.save(basis_path)
                 log_event(
@@ -393,7 +422,7 @@ def main():
                 if k_in_fixed is not None and k_out_fixed is not None:
                     min_pca_out = max(int(k_in_fixed), int(k_out_fixed))
                 mmap_dir = os.environ.get("TMPDIR", "/tmp")
-                rb = PCAReducerVolume(random_state=hyperparams["seed"]).fit_from_mmap(
+                rb = PCAReducerVolume(random_state=int(hyperparams["seed"])).fit_from_mmap(
                     x_mmap,
                     y_mmap,
                     split.train_idx,
@@ -433,6 +462,7 @@ def main():
                 kept_k_out=int(rb.pca_out.n_components_),
             )
         gc.collect()
+    apply_weight_seed(hyperparams["seed"])
     build_out = build_model(args.model, x_mmap, rb, hyperparams)
     if args.model == "AMOR":
         model, k_in, k_out = build_out
@@ -451,6 +481,20 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     mem_mb = model_memory_mb(n_params)
     print(f"Parameters: {n_params:,}  model_mem={mem_mb:.2f} MiB")
+    if protocol_requested():
+        from AMOR.training.loop3d import relative_l1_loss
+        from AMOR.training.protocol_timing import maybe_run
+        model = model.to(device)
+        maybe_run(
+            model, loaders["train"], device,
+            lambda m, x, y: relative_l1_loss(m(x), y),
+            {"entry": os.environ.get("AMOR_PROTOCOL_ENTRY", f"flowbench_{args.model}"),
+             "dataset": "flowbench", "model": args.model, "params": n_params,
+             "precision": "fp32",
+             "block_checkpoint": os.environ.get("AMOR_BLOCK_CHECKPOINT", "1"),
+             "note": "fp32, no bf16; block checkpoint follows AMOR_BLOCK_CHECKPOINT"},
+        )
+        return
 
     xb, yb = next(iter(loaders["train"]))
     if xb.ndim != 5 or yb.ndim != 5:
@@ -513,6 +557,9 @@ def main():
         last_checkpoint_path=last_ckpt_path,
         checkpoint_trainable_only=(args.model == "AMOR"),
     )
+    if args.probe_batches:
+        print("PROBE done", flush=True)
+        return
     elapsed = time.time() - t0
     print(
         f"Training done: loop={train_loop_s:.1f}s wall={elapsed:.1f}s, "

@@ -30,7 +30,7 @@ _PKG_ROOT = os.path.dirname(SCRIPT_DIR)
 from AMOR.paths import expand  # noqa: E402
 
 from AMOR.models.amor import AMOR  # noqa: E402
-from AMOR.datasets.kolmogorov import load_kolmogorov_dataset  # noqa: E402
+from AMOR.data.kolmogorov import load_kolmogorov_dataset  # noqa: E402
 from AMOR.training.loop_timestep import (  # noqa: E402
     compute_rel_metrics,
     compute_rel_metrics_normalized,
@@ -109,6 +109,7 @@ def _fit_basis(
             bc_weight=1.0,
             boundary_threshold=0.1,
             use_boundary_weighting=False,
+            random_state=random_state,
         ).fit(X_train, y_out)
         rb.output_on_increment = output_on_increment
         return rb
@@ -146,6 +147,8 @@ def _fit_basis(
         laplacian_periodic=laplacian_periodic,
         jacobi_alpha=jacobi_alpha,
         jacobi_beta=jacobi_beta,
+        n_components_in=k_in,
+        n_components_out=k_out,
     )
     rb.output_on_increment = output_on_increment
     return rb
@@ -182,6 +185,7 @@ def main():
         choices=ALL_BASIS_TYPES + ("pca_increment",),
     )
     parser.add_argument("--random_state", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=42, help="Pair-shuffle split and torch seed")
     parser.add_argument(
         "--laplacian_periodic",
         action=argparse.BooleanOptionalAction,
@@ -234,12 +238,16 @@ def main():
         Y_train,
         xy_mean,
         xy_std,
-    ) = load_kolmogorov_dataset(args.data_path, return_norm_stats=True)
+    ) = load_kolmogorov_dataset(args.data_path, return_norm_stats=True, seed=args.seed)
 
     from torch.utils.data import DataLoader, TensorDataset
+    from AMOR.data.splits import apply_weight_seed, shuffle_generator
 
     train_loader = DataLoader(
-        TensorDataset(X_train_t, Y_train_t), batch_size=args.batch_size, shuffle=True
+        TensorDataset(X_train_t, Y_train_t),
+        batch_size=args.batch_size,
+        shuffle=True,
+        generator=shuffle_generator(args.seed),
     )
     val_loader = DataLoader(
         TensorDataset(X_val_t, Y_val_t), batch_size=args.batch_size, shuffle=False
@@ -257,12 +265,14 @@ def main():
     dmd_rank = args.dmd_svd_rank
     if args.basis_type == "dmd_hybrid" and dmd_rank is None:
         dmd_rank = args.k_out
+    learned = _is_learned(args.basis_type)
+    basis_seed = args.seed
     rb = _fit_basis(
         args.basis_type,
         X_train,
         Y_train,
         args.data_path,
-        args.random_state,
+        basis_seed,
         args.laplacian_periodic,
         args.jacobi_alpha,
         args.jacobi_beta,
@@ -284,8 +294,8 @@ def main():
         print(f"Note: k clamped: requested {args.k_in}/{args.k_out}, using {k_in}/{k_out}")
     print(f"k_in={k_in}, k_out={k_out}")
 
-    learned = _is_learned(args.basis_type)
     fact = {"auto": "auto", "true": True, "false": False}[args.use_factorized_weights]
+    apply_weight_seed(args.seed)
     model = AMOR(
         width=args.width,
         rb=rb,
@@ -310,10 +320,20 @@ def main():
     params = sum(p.numel() for p in model.parameters())
     n_blocks = model.n_nonlocal_blocks()
     print(f"Parameters: {params:,}  blocks={n_blocks}")
+    from AMOR.training.protocol_timing import maybe_run
+    if maybe_run(
+        model, train_loader, device,
+        lambda m, x, y: torch.nn.functional.l1_loss(x + args.dt * m(x), y),
+        {"entry": os.environ.get("AMOR_PROTOCOL_ENTRY", f"kolm_AMOR_{args.basis_type}"),
+         "dataset": args.data_path, "model": "AMOR", "basis": args.basis_type,
+         "params": params, "precision": "fp32",
+         "block_checkpoint": os.environ.get("AMOR_BLOCK_CHECKPOINT", "1")},
+    ):
+        return
 
     t0 = time.time()
     learned = _is_learned(args.basis_type)
-    es_patience = (args.epochs + 1) if learned else args.early_stopping_patience
+    es_patience = args.early_stopping_patience
     _, _, best_val_rel_l1, training_time, best_epoch, epochs_ran = train_model(
         model,
         train_loader,

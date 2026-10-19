@@ -77,7 +77,9 @@ def load_bcfield_dataset(path: str, *, use_solve_ok_only: bool = False) -> Tuple
         d = {k: _take(k, np.asarray(d0[k]), idx) for k in d0.files}
         n_use = int(idx.shape[0])
     else:
-        d = {k: _take(k, np.asarray(d0[k]), slice(0, n_use)) for k in d0.files}
+        # traction_facet and u_magnitude are not used by training and are tens of GB.
+        skip = {"traction_facet", "u_magnitude"}
+        d = {k: _take(k, np.asarray(d0[k]), slice(0, n_use)) for k in d0.files if k not in skip}
     return d, n_use
 
 

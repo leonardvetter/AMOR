@@ -121,7 +121,7 @@ class PDE3DDataset(Dataset):
         return torch.from_numpy(x), torch.from_numpy(y)
 
 
-def make_dataloaders(x_mmap, y_mmap, split, norm, batch_size, num_workers=0):
+def make_dataloaders(x_mmap, y_mmap, split, norm, batch_size, num_workers=0, generator=None):
     import torch
 
     x_mean, x_std, y_mean, y_std = norm
@@ -138,6 +138,7 @@ def make_dataloaders(x_mmap, y_mmap, split, norm, batch_size, num_workers=0):
             shuffle=(name == "train"),
             num_workers=num_workers,
             pin_memory=torch.cuda.is_available(),
+            generator=generator if name == "train" else None,
         )
     return loaders
 

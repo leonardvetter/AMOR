@@ -80,7 +80,12 @@ def train_model(model, train_loader, val_loader, epochs=300, lr=2e-3,
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=epochs, eta_min=0.0
     )
-    criterion = nn.L1Loss()
+    def _rel_l1(pred, target):
+        batch = pred.shape[0]
+        pred = pred.reshape(batch, -1)
+        target = target.reshape(batch, -1)
+        return ((pred - target).abs().sum(1) / target.abs().sum(1).clamp_min(1e-8)).mean()
+    criterion = _rel_l1
     
     best_val_loss = float('inf')
     best_epoch = 0
@@ -471,7 +476,8 @@ def _model_grid_hw(model):
 
 
 def l2_projection(model, X_new, Y_new, X_train_orig, Y_train_orig,
-                  target_res, device='cuda', batch_size=32, dual_encoder: bool = True):
+                  target_res, device='cuda', batch_size=32, dual_encoder: bool = True,
+                  return_model: bool = False):
     """Transfer method 2: interpolate decoder modes B; dual encoder E=pinv(B).
 
     On equal-weight grids no mass renormalization is required. ``dual_encoder``
@@ -635,7 +641,9 @@ def l2_projection(model, X_new, Y_new, X_train_orig, Y_train_orig,
     }
     model_new.load_state_dict(filtered, strict=False)
     model_new = model_new.to(device)
-    
+    if return_model:
+        return model_new
+
     test_loader = DataLoader(
         TensorDataset(
             torch.from_numpy(X_new).float(),

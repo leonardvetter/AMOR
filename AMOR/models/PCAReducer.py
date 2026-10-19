@@ -706,9 +706,13 @@ class PCAReducerMultiChannelMass:
             raise ValueError(f"n_components={n_components} invalid for data shape {X.shape}")
         mu = X.mean(axis=0)
         Xc = np.asarray(X - mu, dtype=np.float64)
-        Y = apply_mass(M, Xc)  # (n_s, d), rows = (M x_i)^T
-        # G_ij = x_i^T M x_j
-        G = Xc @ Y.T
+        # G_ij = x_i^T M x_j. Chunked so M X is not a second full copy of X.
+        G = np.empty((n_s, n_s), dtype=np.float64)
+        chunk = 128
+        for i0 in range(0, n_s, chunk):
+            sl = slice(i0, min(i0 + chunk, n_s))
+            MXi = apply_mass(M, Xc[sl])
+            G[sl] = MXi @ Xc.T
         G = 0.5 * (G + G.T)
         evals, evecs = np.linalg.eigh(G)
         idx = np.argsort(evals)[::-1][:k]
@@ -717,7 +721,8 @@ class PCAReducerMultiChannelMass:
         # Φ = Xc^T U / sqrt(λ) ⇒ Φ^T M Φ = I (not M Xc^T U — that would bake M twice).
         Phi = (Xc.T @ U) / np.sqrt(lam)[None, :]
         components = Phi.T.astype(np.float32)
-        evr = (lam / max(float(lam.sum()), 1e-30)).astype(np.float32)
+        total = float(np.maximum(evals, 0.0).sum())
+        evr = (np.maximum(evals[idx], 0.0) / max(total, 1e-30)).astype(np.float32)
         return _MassPCAView(
             mean_=mu.astype(np.float32),
             components_=components,

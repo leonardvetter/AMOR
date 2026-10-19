@@ -20,12 +20,12 @@ AMOR/
     PCANet.py
     bases/              # PCA helpers, polynomials, Laplacian, learnable QR/Cayley
     mass/               # lumped nodal mass helper
-  datasets/             # loaders and splits (no binaries)
   training/             # shared loops, metrics, checkpoint helpers
-  data/                 # dataset generators only
+  data/                 # generators and loaders (no binaries)
   scripts/              # train / eval / fit / timing entry points
-  data_efficiency/      # two-stage SI experiments
-  mesh_generalization/  # resolution-transfer SI experiments
+  data_efficiency/      # two-stage memory-efficiency experiment
+  mesh_generalization/  # resolution-transfer experiment
+  Geo-FNO_benchmark/    # airfoil and elasticity; own data.py, runner, and slurm
 ```
 
 Scripts put the repository root on `sys.path`. From any working directory:
@@ -82,7 +82,8 @@ On structured 2D benchmarks, AMOR and PCANet use `k_in = k_out = 144` and FNO us
 | Rib tip basis sweep | `python AMOR/scripts/train_amor_aircraft_rib.py --basis_type learned_qr` |
 | Rib bcfield / mixed | `python AMOR/scripts/fit_aircraft_rib_bcfield_pca.py --data_path …` then `train_amor_aircraft_rib.py --dataset bcfield --data_path … --checkpoint_dir … --pca_npz …` |
 | Mesh generalization | `python AMOR/mesh_generalization/run_mesh_generalization.py` |
-| Data efficiency | `python AMOR/data_efficiency/train_*.py` |
+| Data efficiency | `python AMOR/data_efficiency/run_memory_efficiency.py` |
+| Geo-FNO airfoil / elasticity | `python AMOR/Geo-FNO_benchmark/run_geofno.py --dataset {airfoil,elasticity} --seed 0` |
 
 `train_kolmogorov.py` stores the published per-Reynolds width, depth, and PCA SVD solver in `RE_DEFAULTS`. All trainers keep `use_coordinates=False` and `use_batch_norm=False`. Rib tip defaults enable FiLM; pass `--no_film_conditioning` only if you intentionally disable it.
 
@@ -92,7 +93,7 @@ On structured 2D benchmarks, AMOR and PCANet use `k_in = k_out = 144` and FNO us
 
 ## Recreate datasets
 
-Prefer the Zenodo deposit above. Generators under `AMOR/data/` rebuild the same files:
+Prefer the Zenodo deposit above. Generators and loaders both live under `AMOR/data/` (there is no separate `datasets` package). `aircraft_rib/datasets/` in the path table is only the on-disk directory for generated rib NPZs. Generators rebuild the same files:
 
 ```bash
 # Nonlinear diffusion (paper priors)
@@ -131,7 +132,7 @@ from AMOR.models.PCAReducer import PCAReducerMultiChannel
 
 # Synthetic field-to-field map: (S, 1, 32, 32) -> (S, 1, 32, 32)
 rng = np.random.default_rng(0)
-x = rng.standard_normal((200, 1, 32, 32), dtype=np.float32)
+x = rng.standard_normal((200, 1, 32, 32)).astype(np.float32)
 y = np.sin(x)
 
 rb = PCAReducerMultiChannel(random_state=0).fit(
@@ -157,7 +158,9 @@ Training schedules in the paper scripts are AdamW \(2\cdot10^{-3}\), weight deca
 
 ## Citation
 
-Cite the AMOR paper, this software, and the datasets you use.
+If you use this code, please cite the AMOR paper and this repository. If you use a dataset, please also cite that dataset.
+
+Geo-FNO airfoil and elasticity are trained only by `AMOR/Geo-FNO_benchmark/run_geofno.py`: published 1000/200 split, no validation split, relative L2, batch size 20, 500 epochs, final epoch, width `floor(k_out/2)`, 6 blocks (airfoil) and 4 blocks (elasticity). Data directory is `AMOR_DATA_DIR` (default `<repo>/AMOR/data`, with `Airfoil_dataset/` and `Elasticity_dataset/` inside it). The Slurm scripts read `DATA_DIR` and `OUT_DIR` from `slurm/_env.sh`.
 
 ```bibtex
 @software{voderholzer2026amor,
@@ -176,5 +179,7 @@ Cite the AMOR paper, this software, and the datasets you use.
 **Helmholtz generation** — hippyflow / hippylib.
 
 **FlowBench** — Tali et al., arXiv:2409.18032.
+
+**Geo-FNO airfoil and elasticity** — Li et al., *Fourier Neural Operator with Learned Deformations for PDEs on General Geometries*, JMLR 2023.
 
 See `LICENSE` (placeholder until the final license text is added).

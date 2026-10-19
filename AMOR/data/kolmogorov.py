@@ -1,8 +1,9 @@
 """Kolmogorov flow dataset: trajectory snapshots as consecutive (y_k, y_{k+1}) pairs.
 
-The raw array is (num_trajectories, num_timesteps, H, W). Splits are taken by
-trajectory so no trajectory appears in more than one split, and both fields are
-z-scored with a single scalar mean/std computed on the training split.
+The raw array is (num_trajectories, num_timesteps, H, W). Pairs are laid out in
+trajectory-major order and then split sequentially, the same 70/20/remainder
+rule as nonlinear diffusion and Helmholtz. The weight seed does not enter.
+Both fields are z-scored with one scalar mean and std from the training split.
 """
 
 from __future__ import annotations
@@ -24,8 +25,12 @@ DEFAULT_DATA_PATHS = {
 }
 
 
-def load_kolmogorov_dataset(data_path, return_norm_stats=False):
-    """Load and preprocess Kolmogorov flow dataset."""
+def load_kolmogorov_dataset(data_path, return_norm_stats=False, seed: int = 42):
+    """Load pairs in trajectory-major order and split them sequentially.
+
+    ``seed`` permutes pairs before the 70/20/remainder split. Normalization is
+    fit on that seed's training pairs.
+    """
     print(f"Loading dataset from {data_path}...")
     data = np.load(data_path, mmap_mode='r')
     
@@ -75,19 +80,15 @@ def load_kolmogorov_dataset(data_path, return_norm_stats=False):
     
     print(f"After adding channel dimension: X={X.shape}, Y={Y.shape}")
     
+    from AMOR.data.splits import seeded_split
+
     n = len(X)
-    rng = np.random.default_rng(42)
-    perm = rng.permutation(n)
-    X = X[perm]
-    Y = Y[perm]
-    n_train = int(0.7 * n)
-    n_val = int(0.2 * n)
-    n_test = n - n_train - n_val
-    X_train, Y_train = X[:n_train], Y[:n_train]
-    X_val, Y_val = X[n_train:n_train + n_val], Y[n_train:n_train + n_val]
-    X_test, Y_test = X[n_train + n_val:], Y[n_train + n_val:]
-    
-    print(f"\nTrain/val/test split (shuffled, 70%/20%/remainder):")
+    train_idx, val_idx, test_idx = seeded_split(n, seed)
+    X_train, Y_train = X[train_idx], Y[train_idx]
+    X_val, Y_val = X[val_idx], Y[val_idx]
+    X_test, Y_test = X[test_idx], Y[test_idx]
+
+    print(f"\nTrain/val/test split (seed {seed}, 70%/20%/remainder):")
     print(f"  Training samples: {len(X_train)}")
     print(f"  Validation samples: {len(X_val)}")
     print(f"  Test samples: {len(X_test)}")

@@ -21,7 +21,7 @@ PKG_ROOT = os.path.dirname(SCRIPT_DIR)
 
 from AMOR.models.PCAReducerVolume import PCAReducerVolume
 
-from AMOR.datasets.flowbench3d import (
+from AMOR.data.flowbench3d import (
     DEFAULT_DATA_DIR,
     DEFAULT_RESULTS_DIR,
     geometry_ids,

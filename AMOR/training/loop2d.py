@@ -23,15 +23,18 @@ def set_seed(seed):
 
 
 def l1_loss(pred, target):
-    """L1 loss used for training."""
-    return torch.mean(torch.abs(pred - target))
+    """Mean per-sample relative L1. Training and validation early stopping both use this."""
+    batch = pred.shape[0]
+    pred = pred.reshape(batch, -1)
+    target = target.reshape(batch, -1)
+    return ((pred - target).abs().sum(1) / target.abs().sum(1).clamp_min(1e-8)).mean()
 
 
 def train_model(model, train_loader, val_loader, device, hyperparams, loss_fn=l1_loss):
     """
     Train model with AdamW + CosineAnnealingLR + early stopping.
     Saves best model weights during training and restores them at the end.
-    ``loss_fn(pred, target)`` defaults to the absolute L1 loss. With ``val_loader=None`` there is no
+    ``loss_fn(pred, target)`` defaults to the mean per-sample relative L1. With ``val_loader=None`` there is no
     validation, no early stopping and no restore: the model after the last epoch is kept.
     """
     model = model.to(device)

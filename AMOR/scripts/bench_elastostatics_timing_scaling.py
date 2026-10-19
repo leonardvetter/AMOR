@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.join(PKG_ROOT, "models"))
 from AMOR.models.amor import AMOR  # noqa: E402
 from AMOR.models.FNO3d_neuralop import FNO3d  # noqa: E402
 from AMOR.models.PCAReducerVolume import PCAReducerVolume  # noqa: E402
-from AMOR.datasets.elastostatics3d import open_elastostatics_mmap, random_split  # noqa: E402
+from AMOR.data.elastostatics3d import open_elastostatics_mmap, random_split  # noqa: E402
 
 from AMOR.paths import expand
 

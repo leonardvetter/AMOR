@@ -17,7 +17,7 @@ Published Geo-FNO split 1000 train / 200 test (airfoil test = samples 1000-1199,
 checked against the Geo-FNO scripts). Input = node coordinates (2 channels), output = Mach
 number / stress. Z-score (inputs per node and channel as Geo-FNO's normalizer, std floored at 1% of the channel's median node std; outputs channel-wise) and mass-weighted PCA fit on the train split only; lumped node mass of the
 mean training mesh; (k_in, k_out) from 99.9% explained variance; AMOR with factorized weights, width
-floor(k_out/2), 6 (airfoil) / 4 (elasticity) blocks. AdamW lr 2e-3, wd 1e-4, cosine, `HP["epochs"]` epochs (paper: 300), clip 3.0, no validation / early stopping (final model evaluated),
+floor(k_out/2), 6 (airfoil) / 4 (elasticity) blocks. AdamW lr 2e-3, wd 1e-4, cosine, `HP["epochs"]` epochs (500 in `run_geofno.py`), clip 3.0, no validation / early stopping (final model evaluated),
 batch size 20 (Geo-FNO's; the paper does not state it), relative L2 loss on the physical fields.
 Metrics: per-sample relative L1 / L2 of the physical fields, mean over the 200 test samples, in percent.
 Seeds 0-4 vary initialisation and batch order (the split is fixed).

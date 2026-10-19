@@ -7,6 +7,7 @@ are refit from the stored pca.npz on reload.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import os
@@ -112,6 +113,11 @@ def train_model(
     patience = 0
     history: list[dict] = []
     train_start = time.time()
+    use_bf16 = hyperparams.get("amp") == "bf16"
+    if use_bf16:
+        if device.type != "cuda" or not torch.cuda.is_bf16_supported():
+            raise RuntimeError("bf16 autocast requested but this GPU does not support bfloat16")
+        print("AMP: bf16 autocast on the training forward (eval stays fp32)", flush=True)
 
     if epoch_log_path:
         os.makedirs(os.path.dirname(epoch_log_path), exist_ok=True)
@@ -123,16 +129,31 @@ def train_model(
         model.train()
         train_loss = 0.0
         n_train = 0
+        probe_batches = int(hyperparams.get("probe_batches") or 0)
+        n_probe = 0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad(set_to_none=True)
-            pred = model(xb)
-            loss = relative_l1_loss(pred, yb)
+            amp_ctx = (
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                if use_bf16
+                else contextlib.nullcontext()
+            )
+            with amp_ctx:
+                pred = model(xb)
+                loss = relative_l1_loss(pred, yb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), hyperparams["max_grad_norm"])
             optimizer.step()
             train_loss += loss.item() * xb.size(0)
             n_train += xb.size(0)
+            n_probe += 1
+            if probe_batches and n_probe >= probe_batches:
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                    peak = torch.cuda.max_memory_allocated() / (1024 ** 3)
+                    print(f"PROBE batches={n_probe} peak_alloc_gib={peak:.2f}", flush=True)
+                return 0.0, 0, history, time.time() - train_start
         scheduler.step()
         train_loss /= max(n_train, 1)
 

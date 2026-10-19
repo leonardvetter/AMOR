@@ -3,7 +3,7 @@
 
 Datasets
   cantilever_tip  mass-PCA, scalar-load FiLM, optional mesh bases
-  bcfield         Euclidean PCA from a precomputed --pca_npz bundle
+  bcfield         --mass_pca: consistent P1 mass-PCA; else Euclidean --pca_npz bundle
 
 Tip defaults: mass-PCA, FiLM on, coordinates off, batch-norm off.
 """
@@ -35,7 +35,7 @@ from AMOR.models.PCAReducer import (  # noqa: E402
 )
 from AMOR.models.mass.mesh_mass import lumped_nodal_mass  # noqa: E402
 from AMOR.models.mesh_bases import fit_mesh_alternative_basis_mass  # noqa: E402
-from AMOR.datasets.aircraft_rib import (  # noqa: E402
+from AMOR.data.aircraft_rib_dataset import (  # noqa: E402
     build_field_tensors,
     load_bcfield_dataset,
     normalize_per_channel,
@@ -130,7 +130,12 @@ def train_model(
     model.to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay, betas=(0.9, 0.999), eps=1e-8)
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=0.0)
-    crit = nn.L1Loss()
+    def _rel_l1(pred, target):
+        batch = pred.shape[0]
+        pred = pred.reshape(batch, -1)
+        target = target.reshape(batch, -1)
+        return ((pred - target).abs().sum(1) / target.abs().sum(1).clamp_min(1e-8)).mean()
+    crit = _rel_l1
     best_state = copy.deepcopy(model.state_dict())
     best_val_rel_l1, best_epoch, wait = float("inf"), 0, 0
     t0 = time.time()
@@ -558,32 +563,58 @@ def _run_tip(args, device, eval_deadline_ts):
 
 
 def _run_bcfield(args, device, eval_deadline_ts):
-    if not args.pca_npz:
-        raise SystemExit("--dataset bcfield requires --pca_npz")
-
     d, n_use = load_bcfield_dataset(args.data_path, use_solve_ok_only=args.use_solve_ok_only)
     x, y = build_field_tensors(d, n_use)
+    for key in ("u", "E_nodal", "load_field_boundary", "traction_facet", "u_magnitude"):
+        d.pop(key, None)
     nu = np.asarray(d["nu"], dtype=np.float32).reshape(-1)[:n_use]
     case = np.asarray(d["load_case_id"], dtype=np.float32).reshape(-1)[:n_use]
     print(f"samples={n_use} nodes={x.shape[2]} in_ch={x.shape[1]} out_ch={y.shape[1]}", flush=True)
 
-    rb, stats, film_norm, pca_meta = PCAReducerMultiChannel.load_training_bundle(args.pca_npz)
-    if pca_meta["seed"] != args.seed or pca_meta["train_frac"] != args.train_frac or pca_meta["val_frac"] != args.val_frac:
-        raise ValueError(
-            f"PCA bundle split meta {pca_meta['seed']},{pca_meta['train_frac']},{pca_meta['val_frac']} "
-            f"!= train args {args.seed},{args.train_frac},{args.val_frac}"
-        )
-    if rb.shape_[0] != x.shape[2] or rb.n_channels != x.shape[1] or rb.out_channels != y.shape[1]:
-        raise ValueError(
-            f"PCA bundle shape/channels {rb.shape_},{rb.n_channels},{rb.out_channels} "
-            f"!= data {x.shape[2]},{x.shape[1]},{y.shape[1]}"
-        )
-
     tr_idx, va_idx, te_idx = split_indices(n_use, args.seed, args.train_frac, args.val_frac)
     xn, yn, stats_re = normalize_per_channel(x, y, tr_idx)
-    for key in ("x_mu", "x_std", "y_mu", "y_std"):
-        if not np.allclose(stats[key], stats_re[key], rtol=1e-5, atol=1e-6):
-            raise ValueError(f"PCA bundle {key} mismatch vs recomputed train normalization")
+    del x, y
+    mass_kind = "euclidean"
+    if args.mass_pca:
+        if "nodes" not in d or "elements" not in d:
+            raise SystemExit("--mass_pca requires nodes and elements in the bcfield npz")
+        nodes = np.asarray(d["nodes"], dtype=np.float64)
+        elems = np.asarray(d["elements"], dtype=np.int64)
+        xtr4 = xn[tr_idx][:, :, :, None]
+        ytr4 = yn[tr_idx][:, :, :, None]
+        rb = PCAReducerMultiChannelMass(svd_solver="randomized", random_state=args.seed).fit(
+            xtr4, ytr4,
+            k_in=int(args.k_in),
+            k_out=int(max(args.k_in, args.k_out)),
+            nodes=nodes,
+            elements=elems,
+        )
+        stats = stats_re
+        film_norm = {
+            "nu_mu": float(nu[tr_idx].mean()),
+            "nu_std": float(nu[tr_idx].std() + 1e-8),
+            "case_mu": float(case[tr_idx].mean()),
+            "case_std": float(case[tr_idx].std() + 1e-8),
+        }
+        mass_kind = "consistent_p1"
+        print("bcfield basis: consistent P1 mass-PCA", flush=True)
+    else:
+        if not args.pca_npz:
+            raise SystemExit("--dataset bcfield requires --pca_npz or --mass_pca")
+        rb, stats, film_norm, pca_meta = PCAReducerMultiChannel.load_training_bundle(args.pca_npz)
+        if pca_meta["seed"] != args.seed or pca_meta["train_frac"] != args.train_frac or pca_meta["val_frac"] != args.val_frac:
+            raise ValueError(
+                f"PCA bundle split meta {pca_meta['seed']},{pca_meta['train_frac']},{pca_meta['val_frac']} "
+                f"!= train args {args.seed},{args.train_frac},{args.val_frac}"
+            )
+        if rb.shape_[0] != x.shape[2] or rb.n_channels != x.shape[1] or rb.out_channels != y.shape[1]:
+            raise ValueError(
+                f"PCA bundle shape/channels {rb.shape_},{rb.n_channels},{rb.out_channels} "
+                f"!= data {x.shape[2]},{x.shape[1]},{y.shape[1]}"
+            )
+        for key in ("x_mu", "x_std", "y_mu", "y_std"):
+            if not np.allclose(stats[key], stats_re[key], rtol=1e-5, atol=1e-6):
+                raise ValueError(f"PCA bundle {key} mismatch vs recomputed train normalization")
 
     nun = ((nu - film_norm["nu_mu"]) / film_norm["nu_std"]).astype(np.float32)
     casen = ((case - film_norm["case_mu"]) / film_norm["case_std"]).astype(np.float32)
@@ -595,13 +626,17 @@ def _run_bcfield(args, device, eval_deadline_ts):
 
     k_in = min(args.k_in, rb.pca_in.n_components_)
     k_out = min(args.k_out, rb.pca_out.n_components_)
-    rb.truncate(k_in, k_out)
+    if hasattr(rb, "truncate"):
+        rb.truncate(k_in, k_out)
     print(f"PCA clamp k_in={k_in} k_out={k_out}", flush=True)
 
+    fact = {"auto": "auto", "true": True, "false": False}[args.use_factorized_weights]
     model = AMOR(
         width=args.width, rb=rb, k_in=k_in, k_out=k_out, layers=args.layers,
         dropout=args.dropout, init_scale=args.init_scale, use_skip_connections=True,
         use_batch_norm=False, use_coordinates=False,
+        use_factorized_weights=fact,
+        share_bases=True,
         use_film_conditioning=True, film_hidden=args.film_hidden, film_in_dim=2,
     )
     print(f"params={sum(p.numel() for p in model.parameters()):,}", flush=True)
@@ -653,7 +688,8 @@ def _run_bcfield(args, device, eval_deadline_ts):
             "film_in_dim": 2,
             "normalization": stats,
             "film_norm": film_norm,
-            "pca_npz": os.path.abspath(args.pca_npz),
+            "pca_npz": None if args.mass_pca else os.path.abspath(args.pca_npz),
+            "mass_matrix": mass_kind,
             "data_path": args.data_path,
         },
         ckpt,
@@ -688,7 +724,20 @@ def _run_bcfield(args, device, eval_deadline_ts):
         "test_n_case_id_2": int(len(te2_idx)),
         "k_in": int(k_in),
         "k_out": int(k_out),
-        "pca_npz": os.path.abspath(args.pca_npz),
+        "pca_npz": None if args.mass_pca else os.path.abspath(args.pca_npz),
+        "mass_matrix": mass_kind,
+        "use_factorized_weights": args.use_factorized_weights,
+        "share_bases": True,
+        "use_coordinates": False,
+        "use_batch_norm": False,
+        "blocks": int(args.layers),
+        "seed": int(args.seed),
+        "epochs": int(args.epochs),
+        "num_params": int(sum(p.numel() for p in model.parameters())),
+        "training_time_sec": float(train_time),
+        "train_sec_per_epoch": float(train_time) / max(1, int(best_ep)),
+        "inference_ms_per_sample": float(infer_ms(model, test_loader, device)),
+        "split_rule": f"rng permutation seed={args.seed} train_frac={args.train_frac} val_frac={args.val_frac}",
         "checkpoint": ckpt,
         "stopped_by_slurm_time_budget": bool(stopped),
     }
@@ -709,6 +758,7 @@ def main() -> None:
     p.add_argument("--tag", default=None, help="tip basis-sweep filename tag (default: basis_type)")
     p.add_argument("--skip_if_exists", action="store_true", help="tip basis-sweep: skip if metrics json exists")
     p.add_argument("--pca_npz", type=str, default=None, help="bcfield: bundle from fit_aircraft_rib_bcfield_pca.py")
+    p.add_argument("--mass_pca", action="store_true", help="bcfield: fit consistent P1 mass-PCA (no Euclidean bundle)")
     p.add_argument("--batch_size", type=int, default=None)
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--lr", type=float, default=2e-3)

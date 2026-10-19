@@ -18,12 +18,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import argparse  # noqa: E402
+import json  # noqa: E402
 import os  # noqa: E402
 
 import torch  # noqa: E402
 from torch.utils.data import DataLoader, TensorDataset  # noqa: E402
 
-from AMOR.datasets.kolmogorov import DEFAULT_DATA_PATHS, load_kolmogorov_dataset  # noqa: E402
+from AMOR.data.kolmogorov import DEFAULT_DATA_PATHS, load_kolmogorov_dataset  # noqa: E402
+from AMOR.data.splits import (  # noqa: E402
+    SPLIT_RULE,
+    apply_weight_seed,
+    shuffle_generator,
+)
 from AMOR.models.FNO_model import FNO2d  # noqa: E402
 from AMOR.models.PCANet import PCANet  # noqa: E402
 from AMOR.models.PCAReducer import PCAReducerMultiChannel  # noqa: E402
@@ -82,6 +88,7 @@ def parse_args():
     parser.add_argument("--checkpoint_dir", type=str, default=None,
                         help="Directory to save checkpoints (default: ${AMOR_DATA_ROOT}/checkpoints)")
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--k_in", type=int, default=None,
                         help="PCA input modes for AMOR and PCANet (clamped to fitted PCA rank)")
     parser.add_argument("--k_out", type=int, default=None,
@@ -113,7 +120,7 @@ def fit_pca(x_train, y_train, args):
     if 0 < args.pca_fit_samples < len(x_train):
         import numpy as np
 
-        rng = np.random.default_rng(42)
+        rng = np.random.default_rng(args.seed)
         idx = rng.choice(len(x_train), size=args.pca_fit_samples, replace=False)
         x_fit, y_fit = x_train[idx], y_train[idx]
         print(f"Using {len(x_fit)} / {len(x_train)} training samples for PCA fit")
@@ -121,13 +128,14 @@ def fit_pca(x_train, y_train, args):
         x_fit, y_fit = x_train, y_train
         print(f"Using all {len(x_fit)} training samples for PCA fit")
 
-    solver_kwargs = {"svd_solver": "randomized", "random_state": 42} if args.pca_randomized else {}
+    solver_kwargs = {"svd_solver": "randomized", "random_state": args.seed} if args.pca_randomized else {"random_state": args.seed}
     rb = PCAReducerMultiChannel(
         bc_weight=1.0,
         boundary_threshold=0.1,
         use_boundary_weighting=False,
         **solver_kwargs,
-    ).fit(x_fit, y_fit, n_components_in=args.k_in, n_components_out=args.k_out)
+    ).fit(x_fit, y_fit - x_fit, n_components_in=args.k_in, n_components_out=args.k_out)
+    rb.output_on_increment = True
 
     k_in = min(args.k_in, rb.pca_in.n_components_)
     k_out = min(args.k_out, rb.pca_out.n_components_)
@@ -142,6 +150,7 @@ def fit_pca(x_train, y_train, args):
 def build_models(args, rb, k_in, k_out):
     built = {}
     for name in args.models:
+        apply_weight_seed(args.seed)
         if name == "FNO":
             model = FNO2d(
                 in_channels=1,
@@ -191,9 +200,14 @@ def main():
     print(f"Using device: {device}")
 
     (x_train_t, y_train_t, x_val_t, y_val_t, x_test_t, y_test_t,
-     x_train, y_train, xy_mean, xy_std) = load_kolmogorov_dataset(args.data_path, return_norm_stats=True)
-
-    train_loader = DataLoader(TensorDataset(x_train_t, y_train_t), batch_size=args.batch_size, shuffle=True)
+     x_train, y_train, xy_mean, xy_std    ) = load_kolmogorov_dataset(
+        args.data_path, return_norm_stats=True, seed=args.seed)
+    train_loader = DataLoader(
+        TensorDataset(x_train_t, y_train_t),
+        batch_size=args.batch_size,
+        shuffle=True,
+        generator=shuffle_generator(args.seed),
+    )
     val_loader = DataLoader(TensorDataset(x_val_t, y_val_t), batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(TensorDataset(x_test_t, y_test_t), batch_size=args.batch_size, shuffle=False)
     print(f"\nData loaders created: batch_size={args.batch_size}")
@@ -209,7 +223,18 @@ def main():
         print("\n" + "=" * 70)
         print(f"TRAINING {model_name}")
         print("=" * 70)
-        print(f"{model_name} Parameters: {sum(p.numel() for p in model.parameters()):,}")
+        n_params = sum(p.numel() for p in model.parameters())
+        print(f"{model_name} Parameters: {n_params:,}")
+        from AMOR.training.protocol_timing import maybe_run
+        if maybe_run(
+            model, train_loader, device,
+            lambda m, x, y: torch.nn.functional.l1_loss(x + args.dt * m(x), y),
+            {"entry": os.environ.get("AMOR_PROTOCOL_ENTRY", f"kolm_Re{args.re}_{model_name}"),
+             "dataset": f"kolmogorov_Re{args.re}", "model": model_name,
+             "params": n_params, "precision": "fp32",
+             "block_checkpoint": os.environ.get("AMOR_BLOCK_CHECKPOINT", "1")},
+        ):
+            continue
 
         _, _, best_val_rel_l1, training_time, best_epoch, _ = train_model(
             model, train_loader, val_loader,
@@ -251,6 +276,28 @@ def main():
             'use_coordinates': args.use_coordinates,
             'fno_add_coords': args.fno_add_coords,
         }, checkpoint_path)
+        metrics_path = os.path.join(
+            args.checkpoint_dir, f"{model_name.lower()}_kolmogorov_Re{args.re}_s{args.seed}_metrics.json"
+        )
+        with open(metrics_path, "w") as f:
+            json.dump({
+                "model": model_name,
+                "seed": int(args.seed),
+                "test_rel_l1": float(test_rel_l1),
+                "test_rel_l2": float(test_rel_l2),
+                "num_params": int(sum(p.numel() for p in model.parameters())),
+                "training_time_s": float(training_time),
+                "best_epoch": int(best_epoch),
+                "train_sec_per_epoch": float(training_time) / max(1, int(best_epoch)),
+                "k_in": int(k_in),
+                "k_out": int(k_out),
+                "width": int(args.width),
+                "layers": int(args.layers),
+                "checkpoint": checkpoint_path,
+                "data_path": args.data_path,
+                "split_rule": SPLIT_RULE,
+            }, f, indent=2)
+        print(f"Saved {metrics_path}")
 
         print(f"Best validation rel_l1: {best_val_rel_l1:.4e} (epoch {best_epoch})")
         print(f"Training time: {training_time:.2f} seconds ({training_time/60:.2f} minutes)")

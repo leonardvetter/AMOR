@@ -6,7 +6,7 @@ Protocol (AMOR.tex, "Model configurations and training", and SI configuration ta
   fit on the train split only;
   mass-weighted PCA with the lumped node mass of the mesh, (k_in, k_out) from 99.9% explained variance;
   AMOR with factorized weights, width = floor(k_out / 2), 6 blocks (airfoil) / 4 blocks (elasticity);
-  AdamW (lr 2e-3, wd 1e-4), cosine annealing, 300 epochs (HP["epochs"]; AMOR.tex protocol), grad-clip 3.0, relative L2 training loss on the
+  AdamW (lr 2e-3, wd 1e-4), cosine annealing, HP["epochs"] epochs (500 in this file), grad-clip 3.0, relative L2 training loss on the
   physical (denormalised) fields, as in Geo-FNO. No validation set / early stopping: the final model is evaluated.
 Errors: mean per-sample relative L1 / L2 of the physical fields on the 200 test samples, in percent.
 Seeds vary the model initialisation and the batch order (the split is the published one).

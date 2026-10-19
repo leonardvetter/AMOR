@@ -30,7 +30,7 @@ PKG_ROOT = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, os.path.join(PKG_ROOT, "models"))
 
 from AMOR.models.PCAReducerVolume import PCAReducerVolume  # noqa: E402
-from AMOR.datasets.elastostatics3d import (  # noqa: E402
+from AMOR.data.elastostatics3d import (  # noqa: E402
     PDE3DSplit,
     compute_norm_stats,
     make_dataloaders,
@@ -105,6 +105,9 @@ def parse_args():
     p.add_argument("--layers", type=int, default=None)
     p.add_argument("--weight-decay", type=float, default=None)
     p.add_argument("--patience", type=int, default=None)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--train-frac", type=float, default=None)
+    p.add_argument("--val-frac", type=float, default=None)
     p.add_argument("--pca-j", type=float, default=0.99,
                    help="AMOR variance fraction (default 0.99)")
     p.add_argument("--fno-modes", type=int, default=12,
@@ -151,6 +154,12 @@ def main():
     if args.fno_modes is not None:
         m = int(args.fno_modes)
         hyperparams["fno_modes"] = (m, m, m)
+    if args.seed is not None:
+        hyperparams["seed"] = int(args.seed)
+    if args.train_frac is not None:
+        hyperparams["train_frac"] = float(args.train_frac)
+    hyperparams["val_frac"] = 0.10 if args.val_frac is None else float(args.val_frac)
+    hyperparams["test_frac"] = 1.0 - float(hyperparams["train_frac"]) - float(hyperparams["val_frac"])
     if args.pca_j is not None:
         hyperparams["pca_j_in"] = float(args.pca_j)
         hyperparams["pca_j_out"] = float(args.pca_j)
@@ -161,11 +170,12 @@ def main():
     os.makedirs(args.results_dir, exist_ok=True)
     prefix = run_prefix(N, args.model, hyperparams)
     result_path = os.path.join(args.results_dir, f"{prefix}_results.json")
-    if os.path.exists(result_path) and not args.dry_run and not args.eval_only:
+    from AMOR.training.protocol_timing import protocol_requested
+    if os.path.exists(result_path) and not args.dry_run and not args.eval_only and not protocol_requested():
         print(f"Result exists: {result_path}\nDelete to re-run.")
         sys.exit(0)
 
-    set_seed(hyperparams["seed"])
+    from AMOR.data.splits import apply_weight_seed, shuffle_generator
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     wall_start = time.time()
@@ -178,7 +188,7 @@ def main():
         x_mmap.shape[0],
         train_frac=hyperparams["train_frac"],
         val_frac=hyperparams["val_frac"],
-        seed=hyperparams["seed"],
+        seed=int(hyperparams["seed"]),
     )
     if args.limit_train is not None or args.limit_eval is not None:
         lt = args.limit_train if args.limit_train is not None else len(split.train_idx)
@@ -203,7 +213,8 @@ def main():
         split, norm, hyperparams, ds_meta,
     )
     loaders = make_dataloaders(
-        x_mmap, y_mmap, split, norm, hyperparams["batch_size"], hyperparams["num_workers"]
+        x_mmap, y_mmap, split, norm, hyperparams["batch_size"], hyperparams["num_workers"],
+        generator=shuffle_generator(int(hyperparams["seed"])),
     )
 
     rb = None
@@ -216,7 +227,7 @@ def main():
         if hyperparams.get("k_in") is not None:
             fit_kw["n_components_in"] = int(hyperparams["k_in"])
             fit_kw["n_components_out"] = int(hyperparams["k_out"])
-        rb = PCAReducerVolume(random_state=hyperparams["seed"]).fit_from_mmap(
+        rb = PCAReducerVolume(random_state=int(hyperparams["seed"])).fit_from_mmap(
             x_mmap, y_mmap, split.train_idx, **fit_kw,
             mmap_dir=os.environ.get("TMPDIR", "/tmp"),
         )
@@ -229,6 +240,7 @@ def main():
         print(f"AMOR modes k_in={k_in} k_out={k_out}  pca_s={time.time()-t_pca:.1f}")
         gc.collect()
 
+    apply_weight_seed(hyperparams["seed"])
     build_out = build_model(args.model, x_mmap, y_mmap, rb, hyperparams)
     if args.model == "AMOR":
         model, k_in, k_out = build_out
@@ -237,6 +249,19 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     n_blocks = model.n_nonlocal_blocks() if hasattr(model, "n_nonlocal_blocks") else None
     print(f"Parameters: {n_params:,}  blocks={n_blocks}")
+    if protocol_requested():
+        from AMOR.training.loop3d import relative_l1_loss
+        from AMOR.training.protocol_timing import maybe_run
+        model = model.to(device)
+        maybe_run(
+            model, loaders["train"], device,
+            lambda m, x, y: relative_l1_loss(m(x), y),
+            {"entry": os.environ.get("AMOR_PROTOCOL_ENTRY", f"elastostatics_{args.model}"),
+             "dataset": "elastostatics", "model": args.model, "params": n_params,
+             "precision": "fp32",
+             "block_checkpoint": os.environ.get("AMOR_BLOCK_CHECKPOINT", "1")},
+        )
+        return
 
     xb, yb = next(iter(loaders["train"]))
     xb, yb = xb.to(device), yb.to(device)
@@ -330,7 +355,7 @@ def main():
         "N": N,
         "dataset": args.data_path,
         "mapping": f"E({N}^3)->(ux,uy,uz)({N}^3)",
-        "error_space": "original_units",
+        "error_space": "physical_denormalized",
         "hyperparameters": hyperparams,
         "num_params": n_params,
         "n_blocks": n_blocks,

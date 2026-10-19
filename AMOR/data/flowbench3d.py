@@ -213,6 +213,7 @@ def make_dataloaders(
     norm: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     batch_size: int,
     num_workers: int = 0,
+    generator=None,
 ) -> Dict[str, DataLoader]:
     import torch
 
@@ -230,6 +231,7 @@ def make_dataloaders(
             shuffle=(name == "train"),
             num_workers=num_workers,
             pin_memory=torch.cuda.is_available(),
+            generator=generator if name == "train" else None,
         )
     return loaders
 

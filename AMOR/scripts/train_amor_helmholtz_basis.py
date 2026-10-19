@@ -178,7 +178,11 @@ def train(model, train_loader, val_loader, device, args):
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr,
                             weight_decay=args.weight_decay, betas=(0.9, 0.999), eps=1e-8)
     sched = CosineAnnealingLR(opt, T_max=args.epochs, eta_min=0.0)
-    l1 = lambda p, t: torch.mean(torch.abs(p - t))
+    def l1(p, t):
+        batch = p.shape[0]
+        p = p.reshape(batch, -1)
+        t = t.reshape(batch, -1)
+        return ((p - t).abs().sum(1) / t.abs().sum(1).clamp_min(1e-8)).mean()
 
     best_val = float("inf")
     best_epoch = 0
@@ -212,7 +216,7 @@ def train(model, train_loader, val_loader, device, args):
             patience = 0
         else:
             patience += 1
-        if patience >= (args.epochs + 1 if _is_learned(args.basis_type) else args.early_stopping_patience):
+        if patience >= args.early_stopping_patience:
             print(f"  Early stop @ epoch {epoch+1} (best {best_epoch+1})")
             break
         if epoch == 0 or (epoch + 1) % 10 == 0:
@@ -312,14 +316,14 @@ def main():
 
     device = torch.device(args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu")
     print(f"Device: {device} | variant={args.variant} | basis={args.basis_type}")
-    set_seed(args.seed)
+    from AMOR.data.splits import apply_weight_seed, seeded_split, shuffle_generator
 
     data_path = os.path.join(args.data_dir, VARIANT_FILE[args.variant])
     X, Y = load_helmholtz(data_path, args.num_samples)
     n = len(X)
-    n_tr, n_val = int(0.7 * n), int(0.2 * n)
-    Xtr, Xval, Xte = X[:n_tr], X[n_tr:n_tr + n_val], X[n_tr + n_val:]
-    Ytr, Yval, Yte = Y[:n_tr], Y[n_tr:n_tr + n_val], Y[n_tr + n_val:]
+    tr_i, va_i, te_i = seeded_split(n, args.seed)
+    Xtr, Xval, Xte = X[tr_i], X[va_i], X[te_i]
+    Ytr, Yval, Yte = Y[tr_i], Y[va_i], Y[te_i]
 
     Xm = Xtr.mean(axis=(0, 2, 3), keepdims=True); Xs = Xtr.std(axis=(0, 2, 3), keepdims=True)
     Ym = Ytr.mean(axis=(0, 2, 3), keepdims=True); Ys = Ytr.std(axis=(0, 2, 3), keepdims=True)
@@ -330,13 +334,16 @@ def main():
 
     def loader(Xa, Ya, shuffle):
         return DataLoader(TensorDataset(torch.from_numpy(Xa), torch.from_numpy(Ya)),
-                          batch_size=args.batch_size, shuffle=shuffle, num_workers=0)
+                          batch_size=args.batch_size, shuffle=shuffle, num_workers=0,
+                          generator=shuffle_generator(args.seed) if shuffle else None)
     train_loader = loader(Xtr, Ytr, True)
     val_loader = loader(Xval, Yval, False)
     test_loader = loader(Xte, Yte, False)
 
     print(f"Fitting basis '{args.basis_type}' (k_in={k_in}, k_out={k_out})...")
-    rb = fit_basis(args.basis_type, Xtr, Ytr, k_in, k_out, args.random_state,
+    learned_basis = _is_learned(args.basis_type)
+    basis_seed = args.seed
+    rb = fit_basis(args.basis_type, Xtr, Ytr, k_in, k_out, basis_seed,
                    args.laplacian_periodic, args.jacobi_alpha, args.jacobi_beta,
                    dis_rows_path=args.dis_rows_path)
     k_in = min(k_in, rb.pca_in.n_components_)
@@ -344,7 +351,8 @@ def main():
     if hasattr(rb, "truncate"):
         rb.truncate(k_in, k_out)
 
-    learned = _is_learned(args.basis_type)
+    learned = learned_basis
+    apply_weight_seed(args.seed)
     model = AMOR(
         width=width, rb=rb, k_in=k_in, k_out=k_out, layers=layers,
         dropout=0.0, init_scale=0.1, use_skip_connections=True,
@@ -357,6 +365,16 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     n_blocks = model.n_nonlocal_blocks()
     print(f"Params: {n_params:,}  blocks={n_blocks}")
+    from AMOR.training.protocol_timing import maybe_run
+    if maybe_run(
+        model, train_loader, device,
+        lambda m, x, y: torch.nn.functional.l1_loss(m(x), y),
+        {"entry": os.environ.get("AMOR_PROTOCOL_ENTRY", f"helm_{args.variant}_AMOR_{tag}"),
+         "dataset": args.variant, "model": "AMOR", "basis": args.basis_type,
+         "params": n_params, "precision": "fp32",
+         "block_checkpoint": os.environ.get("AMOR_BLOCK_CHECKPOINT", "1")},
+    ):
+        return
 
     best_val, best_epoch, epochs_ran, train_time = train(model, train_loader, val_loader, device, args)
     sec_per_epoch = train_time / max(1, epochs_ran)

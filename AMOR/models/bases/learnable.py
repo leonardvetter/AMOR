@@ -55,6 +55,26 @@ class LearnableOrthonormalBasis(nn.Module):
             )
         else:
             self.mass_diag = None
+        self._eval_components = None
+
+    def train(self, mode: bool = True):
+        if mode:
+            self._eval_components = None
+        return super().train(mode)
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        self._eval_components = None
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
+
+    def _components_cached(self, build):
+        """Reuse the orthonormal rows at inference. Training recomputes them."""
+        if not self.training and self._eval_components is not None:
+            return self._eval_components
+        computed = build()
+        if self.training:
+            return computed
+        self._eval_components = computed.detach()
+        return self._eval_components
 
     def components(self) -> torch.Tensor:
         raise NotImplementedError
@@ -125,7 +145,7 @@ class QROrthonormalBasis(LearnableOrthonormalBasis):
         self.raw = nn.Parameter(raw)
 
     def components(self) -> torch.Tensor:
-        return self._qr_rows(self.raw)
+        return self._components_cached(lambda: self._qr_rows(self.raw))
 
 
 class CayleyOrthonormalBasis(LearnableOrthonormalBasis):
@@ -149,8 +169,11 @@ class CayleyOrthonormalBasis(LearnableOrthonormalBasis):
         self.s = nn.Parameter(torch.zeros(k, k))
 
     def components(self) -> torch.Tensor:
-        r = self._qr_rows(self.raw)
-        return self._cayley_rotation(r) @ r
+        def build():
+            r = self._qr_rows(self.raw)
+            return self._cayley_rotation(r) @ r
+
+        return self._components_cached(build)
 
 
 class SpanFrozenCayleyBasis(LearnableOrthonormalBasis):
@@ -179,15 +202,18 @@ class SpanFrozenCayleyBasis(LearnableOrthonormalBasis):
         self.register_buffer("q0", torch.from_numpy(q.T.astype(np.float32)))
         self.s = nn.Parameter(torch.zeros(k, k))
 
+    def _rotation(self) -> torch.Tensor:
+        return self._components_cached(lambda: self._cayley_rotation(self.q0))
+
     def components(self) -> torch.Tensor:
-        return self._cayley_rotation(self.q0) @ self.q0
+        return self._rotation() @ self.q0
 
     def encode(self, x: torch.Tensor, d: int) -> torch.Tensor:
         z0 = (x - self.mean[:d]) @ self.q0[:, :d].T
-        return z0 @ self._cayley_rotation(self.q0).T
+        return z0 @ self._rotation().T
 
     def decode(self, z: torch.Tensor, d_out: int) -> torch.Tensor:
-        z0 = z @ self._cayley_rotation(self.q0)
+        z0 = z @ self._rotation()
         return z0 @ self.q0[:, :d_out] + self.mean[:d_out]
 
 

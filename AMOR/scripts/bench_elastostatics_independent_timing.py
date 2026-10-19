@@ -35,7 +35,7 @@ from bench_elastostatics_timing_scaling import (  # noqa: E402
     make_synthetic_rb,
     measure,
 )
-from AMOR.datasets.elastostatics3d import open_elastostatics_mmap, random_split  # noqa: E402
+from AMOR.data.elastostatics3d import open_elastostatics_mmap, random_split  # noqa: E402
 
 # Dense equal-rank grid: k_in = k_out = k
 AMOR_KS = [1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64]

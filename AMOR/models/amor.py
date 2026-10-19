@@ -458,7 +458,9 @@ class ReducedBasisBlock(nn.Module):
             else:
                 enc = h.out_enc if getattr(h, "out_enc", None) is not None else h.out_comp
                 mean = h.out_mean
-            z_flat = torch.matmul(x_flat - mean[:D].unsqueeze(0), enc[:, :D].transpose(0, 1))
+            # F.linear computes x @ E^T without saving a dense transpose of E.
+            centered = x_flat - mean[:D].unsqueeze(0)
+            z_flat = torch.nn.functional.linear(centered, enc[:, :D])
         elif getattr(self, "_has_dual_encoder", False):
             # Dual / M-adjoint rows already bake the metric: z = E (x − μ).
             enc = self.enc_components_t[:D, :]
@@ -514,10 +516,12 @@ class ReducedBasisBlock(nn.Module):
             h = self._shared_fixed_basis
             comp, mean = (h.in_comp, h.in_mean) if self.use_input_basis_for_decoder else (h.out_comp, h.out_mean)
             out_dim = self.output_dim
-            y_flat = torch.matmul(z_flat, comp[:, :out_dim]) + mean[:out_dim]
+            y_flat = torch.matmul(z_flat, comp[:, :out_dim])
+            y_flat.add_(mean[:out_dim])
         else:
             # On-device GEMM: bases move with the module (GPU when model on GPU).
-            y_flat = torch.matmul(z_flat, self.dec_components) + self.dec_mean
+            y_flat = torch.matmul(z_flat, self.dec_components)
+            y_flat.add_(self.dec_mean)
         
         return y_flat.reshape(B, width, self.output_dim)
 
@@ -553,20 +557,24 @@ class ReducedBasisBlock(nn.Module):
         """
         B = x.shape[0]
         
+        def conv_chunked(conv, seq):
+            # 1x1 conv is pointwise, so spatial chunks match one full conv.
+            n = seq.shape[-1]
+            if not seq.is_cuda or n < 1_000_000:
+                return conv(seq)
+            parts = []
+            step = max(n // 4, 1)
+            for i0 in range(0, n, step):
+                parts.append(conv(seq[..., i0:i0 + step]))
+            return torch.cat(parts, dim=-1)
+
         if self.input_dim == self.output_dim:
-            # Same dimensions: apply convolution directly
-            return self.skip_conv(x)
+            return conv_chunked(self.skip_conv, x)
         else:
-            # Dimension transition: reshape to separate spatial and channel dims
-            # (B, width, C_in * N * M) -> (B, width, C_in, N * M)
+            # (B, width, C_in * spatial) -> (B, width * C_in, spatial)
             x_reshape = x.view(B, self.width, self.input_channels, -1)
-            # (B, width, C_in, N * M) -> (B, width * C_in, N * M)
             x_reshape = x_reshape.view(B, self.width * self.input_channels, -1)
-            
-            # Apply convolution: (B, width * C_in, N * M) -> (B, width * C_out, N * M)
-            out = self.skip_conv(x_reshape)
-            
-            # Reshape back: (B, width * C_out, N * M) -> (B, width, C_out * N * M)
+            out = conv_chunked(self.skip_conv, x_reshape)
             out = out.view(B, self.width, self.C_out, -1)
             return out.view(B, self.width, -1)
 
@@ -599,11 +607,24 @@ class ReducedBasisBlock(nn.Module):
         
         # 5. Decode back to function space
         y = self.decode(z_out)
-        
-        # 6. Add skip connection
-        y = y + self._apply_skip_connection(x)
-        
+
+        # 6. Add the 1x1 skip in spatial chunks so the full skip tensor is never allocated.
+        self._add_skip_inplace(y, x)
         return y
+
+    def _add_skip_inplace(self, y: torch.Tensor, x: torch.Tensor) -> None:
+        b = x.shape[0]
+        if self.input_dim == self.output_dim:
+            seq, dest, conv = x, y, self.skip_conv
+        else:
+            seq = x.view(b, self.width * self.input_channels, -1)
+            dest = y.view(b, self.width * self.C_out, -1)
+            conv = self.skip_conv
+        n = seq.shape[-1]
+        step = n if (not seq.is_cuda or n < 1_000_000) else max(n // 4, 1)
+        for i0 in range(0, n, step):
+            sl = slice(i0, min(n, i0 + step))
+            dest[..., sl].add_(conv(seq[..., sl]))
 
 
 class ScalarGate(nn.Module):
@@ -1087,30 +1108,48 @@ class AMOR(nn.Module):
 
         return y
 
+    def _block_out(self, block, gate, h, film_cond):
+        return self._apply_film(self.act(gate(block(h))), film_cond)
+
+    def _run_block(self, block, gate, h, film_cond, recompute: bool = False):
+        del recompute
+        import os
+        checkpoint_blocks = os.environ.get("AMOR_BLOCK_CHECKPOINT", "1") != "0"
+        if self.training and h.is_cuda and checkpoint_blocks:
+            import torch.utils.checkpoint as ckpt
+            return ckpt.checkpoint(
+                self._block_out, block, gate, h, film_cond, use_reentrant=False
+            )
+        return self._block_out(block, gate, h, film_cond)
+
     def _forward_blocks(
         self, h: torch.Tensor, film_cond: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         if self.uniform_basis_blocks:
             for block, gate in zip(self.blocks, self.gates):
-                residual = self._apply_film(self.act(gate(block(h))), film_cond)
+                residual = self._run_block(block, gate, h, film_cond)
                 if self.use_skip_connections:
-                    h = h + residual
+                    h = self._accum(h, residual)
                 else:
                     h = residual
         else:
-            h0 = self._apply_film(self.act(self.gate0(self.block0(h))), film_cond)
+            h0 = self._run_block(self.block0, self.gate0, h, film_cond, recompute=True)
             if self.use_skip_connections:
-                h = h0 + h
+                h = self._accum(h0, h)
             else:
                 h = h0
-            h = self._apply_film(self.act(self.gate1(self.block1(h))), film_cond)
+            h = self._run_block(self.block1, self.gate1, h, film_cond)
             for block, gate in zip(self.blocks, self.gates):
-                residual = self._apply_film(self.act(gate(block(h))), film_cond)
+                residual = self._run_block(block, gate, h, film_cond)
                 if self.use_skip_connections:
-                    h = h + residual
+                    h = self._accum(h, residual)
                 else:
                     h = residual
         return h
+
+    @staticmethod
+    def _accum(base: torch.Tensor, extra: torch.Tensor) -> torch.Tensor:
+        return base + extra
 
     def count_parameters(self) -> int:
         """Return total number of trainable parameters."""

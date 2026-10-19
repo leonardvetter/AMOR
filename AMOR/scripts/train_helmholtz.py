@@ -40,7 +40,8 @@ from AMOR.models.amor import AMOR
 from AMOR.models.FNO_model import FNO2d
 from AMOR.models.PCANet import PCANet
 from AMOR.models.PCAReducer import PCAReducerMultiChannel
-from AMOR.training.loop2d import l1_loss, set_seed, train_model
+from AMOR.data.splits import SPLIT_RULE, apply_weight_seed, seeded_split, shuffle_generator
+from AMOR.training.loop2d import l1_loss, train_model
 
 HYPERPARAMETERS = {
     'fno_modes': (12, 12),
@@ -106,14 +107,21 @@ def parse_args():
         default=None,
         help='Train only this model (default: all).',
     )
+    parser.add_argument('--seed', type=int, default=None)
+    parser.add_argument('--results_dir', default=None)
+    parser.add_argument('--data_dir', default=None)
+    parser.add_argument('--skip_cross', action='store_true')
     return parser.parse_args()
 
 
 
 
 def l1_loss(pred, target):
-    """L1 loss used for training."""
-    return torch.mean(torch.abs(pred - target))
+    """Mean per-sample relative L1."""
+    batch = pred.shape[0]
+    pred = pred.reshape(batch, -1)
+    target = target.reshape(batch, -1)
+    return ((pred - target).abs().sum(1) / target.abs().sum(1).clamp_min(1e-8)).mean()
 
 
 def load_helmholtz_dataset(dataset_path, num_samples=10000):
@@ -204,15 +212,15 @@ def main():
     if _env_bin not in _os.environ.get('PATH', ''):
         _os.environ['PATH'] = _env_bin + ':' + _os.environ.get('PATH', '')
 
-    data_dir = expand('${AMOR_SCRATCH_DATA}')  # rename path on a different cluster
-    results_dir = expand('${AMOR_SCRATCH_DATA}/helmholtz_model_comparison')  # rename path on a different cluster
+    if args.seed is not None:
+        HYPERPARAMETERS['seed'] = int(args.seed)
+    data_dir = args.data_dir or expand('${AMOR_SCRATCH_DATA}')
+    results_dir = args.results_dir or expand('${AMOR_SCRATCH_DATA}/helmholtz_model_comparison')
     os.makedirs(results_dir, exist_ok=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     print(f"Hyperparameters: {HYPERPARAMETERS}")
-
-    set_seed(HYPERPARAMETERS['seed'])
 
     for train_dataset_name, train_dataset_type in DATASETS.items():
         if args.dataset is not None and train_dataset_type != args.dataset:
@@ -230,15 +238,12 @@ def main():
             train_dataset_path, HYPERPARAMETERS['num_samples']
         )
         n = len(X_full)
-        n_train = int(HYPERPARAMETERS['train_frac'] * n)
-        n_val = int(HYPERPARAMETERS['val_frac'] * n)
-
-        X_train = X_full[:n_train]
-        X_val = X_full[n_train:n_train + n_val]
-        X_test = X_full[n_train + n_val:]
-        Y_train = Y_full[:n_train]
-        Y_val = Y_full[n_train:n_train + n_val]
-        Y_test = Y_full[n_train + n_val:]
+        train_idx, val_idx, test_idx = seeded_split(
+            n, HYPERPARAMETERS['seed'], HYPERPARAMETERS['train_frac'], HYPERPARAMETERS['val_frac'],
+        )
+        n_train, n_val = len(train_idx), len(val_idx)
+        X_train, X_val, X_test = X_full[train_idx], X_full[val_idx], X_full[test_idx]
+        Y_train, Y_val, Y_test = Y_full[train_idx], Y_full[val_idx], Y_full[test_idx]
 
         X_mean = X_train.mean(axis=(0, 2, 3), keepdims=True)
         X_std = X_train.std(axis=(0, 2, 3), keepdims=True)
@@ -256,12 +261,14 @@ def main():
         del X_full, Y_full
         gc.collect()
 
+        shuffle_gen = shuffle_generator(HYPERPARAMETERS['seed'])
         train_loader = DataLoader(
             TensorDataset(
                 torch.from_numpy(X_train).float(),
                 torch.from_numpy(Y_train).float(),
             ),
-            batch_size=HYPERPARAMETERS['batch_size'], shuffle=True, num_workers=2,
+            batch_size=HYPERPARAMETERS['batch_size'], shuffle=True, num_workers=0,
+            generator=shuffle_gen,
         )
         val_loader = DataLoader(
             TensorDataset(
@@ -283,7 +290,8 @@ def main():
         # Fit PCA basis (shared by AMOR and PCANet)
         print("Computing PCA...")
         rb = PCAReducerMultiChannel(
-            bc_weight=1.0, boundary_threshold=0.1, use_boundary_weighting=False
+            bc_weight=1.0, boundary_threshold=0.1, use_boundary_weighting=False,
+            random_state=HYPERPARAMETERS['seed'],
         ).fit(X_train, Y_train,
               n_components_in=model_cfg['k_in'], n_components_out=model_cfg['k_out'])
         k_in = min(model_cfg['k_in'], rb.pca_in.n_components_)
@@ -337,21 +345,32 @@ def main():
             model_factories = {args.model: model_factories[args.model]}
 
         for model_name, model_factory in model_factories.items():
+            seed_tag = f"_s{HYPERPARAMETERS['seed']}" if args.results_dir else ""
             result_path = os.path.join(
-                results_dir, f"{train_dataset_type}_{model_name}_results.json"
+                results_dir, f"{train_dataset_type}_{model_name}{seed_tag}_results.json"
             )
 
             # Resume: skip if already done
-            if os.path.exists(result_path):
+            from AMOR.training.protocol_timing import maybe_run, protocol_requested
+            if os.path.exists(result_path) and not protocol_requested():
                 print(f"\n--- {model_name}: result exists, skipping ({result_path}) ---")
                 continue
 
             print(f"\n--- Training {model_name} ---")
-            set_seed(HYPERPARAMETERS['seed'])
+            apply_weight_seed(HYPERPARAMETERS['seed'])
 
             model = model_factory()
             n_params = sum(p.numel() for p in model.parameters())
             print(f"  Parameters: {n_params:,}")
+            if maybe_run(
+                model, train_loader, device,
+                lambda m, x, y: l1_loss(m(x), y),
+                {"entry": os.environ.get("AMOR_PROTOCOL_ENTRY", f"helm_{train_dataset_type}_{model_name}"),
+                 "dataset": train_dataset_type, "model": model_name,
+                 "params": n_params, "precision": "fp32",
+                 "block_checkpoint": os.environ.get("AMOR_BLOCK_CHECKPOINT", "1")},
+            ):
+                continue
 
             try:
                 model = torch.compile(model)
@@ -367,7 +386,7 @@ def main():
 
             # Save model checkpoint (best weights)
             checkpoint_path = os.path.join(
-                results_dir, f"{train_dataset_type}_{model_name}_model.pt"
+                results_dir, f"{train_dataset_type}_{model_name}{seed_tag}_model.pt"
             )
             torch.save(model.state_dict(), checkpoint_path)
 
@@ -398,11 +417,25 @@ def main():
                 'best_epoch': best_epoch + 1,
                 'training_time_s': elapsed,
                 'num_params': n_params,
+                'seed': int(HYPERPARAMETERS['seed']),
+                'checkpoint': checkpoint_path,
+                'layers': int(model_cfg['layers']),
+                'width': int(model_cfg['width']),
+                'k_in': int(k_in),
+                'k_out': int(k_out),
+                'epochs': int(HYPERPARAMETERS['epochs']),
+                'data_path': train_dataset_path,
+                'split_rule': SPLIT_RULE,
+                'metric': 'denormalized |u| magnitude relative L1/L2 percent',
+                'n_train': int(n_train),
+                'n_val': int(n_val),
+                'n_test': int(n - n_train - n_val),
             }
 
             # Cross-dataset evaluation (model already has best weights)
             cross_results = []
-            for test_ds_name, test_ds_type in DATASETS.items():
+            cross_iter = [] if args.skip_cross else list(DATASETS.items())
+            for test_ds_name, test_ds_type in cross_iter:
                 if test_ds_name == train_dataset_name:
                     continue
                 test_ds_path = os.path.join(data_dir, test_ds_name)

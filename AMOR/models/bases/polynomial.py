@@ -5,7 +5,19 @@ import numpy as np
 from numpy.polynomial import chebyshev, legendre
 from scipy.special import eval_jacobi
 
-from .common import orthonormal_rows
+def _lowdin_rows(candidates: np.ndarray, k: int) -> np.ndarray:
+    """Symmetric orthonormalization, orth(Ξ) = Ξ (Ξᵀ Ξ)^{-1/2}.
+
+    Euclidean QR on a nested total-degree flag collapses Jacobi, Legendre, and
+    Chebyshev to one basis up to sign. Löwdin keeps the raw Gram matrix, so the
+    three families stay distinct. This is the paper's orth_M with M = I.
+    """
+    rows = np.asarray(candidates[:k], dtype=np.float64)
+    gram = rows @ rows.T
+    evals, evecs = np.linalg.eigh(0.5 * (gram + gram.T))
+    inv_sqrt = evecs * (1.0 / np.sqrt(np.clip(evals, 1e-12, None)))
+    whitened = (inv_sqrt @ evecs.T) @ rows
+    return whitened.astype(np.float32)
 
 
 def _poly_basis_1d(family: str, deg: int, xs: np.ndarray, alpha: float, beta: float) -> np.ndarray:
@@ -33,4 +45,4 @@ def polynomial_rows(n: int, m: int, k: int, family: str, alpha: float, beta: flo
                 break
         if len(modes) >= k:
             break
-    return orthonormal_rows(np.stack(modes, axis=0), k)
+    return _lowdin_rows(np.stack(modes, axis=0), k)

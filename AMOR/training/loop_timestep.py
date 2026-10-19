@@ -35,7 +35,8 @@ def train_model(model, train_loader, val_loader, epochs=300, lr=2e-3, weight_dec
         eps=1e-8
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=0.0)
-    criterion = nn.L1Loss()
+    from AMOR.training.loop2d import l1_loss
+    criterion = l1_loss
 
     train_losses = []
     val_losses = []

@@ -178,7 +178,11 @@ def train(model, tr, va, dev, args):
         betas=(0.9, 0.999), eps=1e-8,
     )
     sch = CosineAnnealingLR(opt, T_max=args.epochs, eta_min=0.0)
-    l1 = lambda p, t: torch.mean(torch.abs(p - t))
+    def l1(p, t):
+        batch = p.shape[0]
+        p = p.reshape(batch, -1)
+        t = t.reshape(batch, -1)
+        return ((p - t).abs().sum(1) / t.abs().sum(1).clamp_min(1e-8)).mean()
     best, be, best_st, pat, ep_ran, t0 = float("inf"), 0, copy.deepcopy(model.state_dict()), 0, 0, time.time()
     for ep in range(args.epochs):
         ep_ran = ep + 1
@@ -206,7 +210,7 @@ def train(model, tr, va, dev, args):
             pat += 1
         if ep == 0 or (ep + 1) % 10 == 0:
             print(f"  epoch {ep + 1} val_l1={vl:.6f} best={best:.6f}@{be + 1}", flush=True)
-        if pat >= (args.epochs + 1 if args.basis_type in LEARNED else args.early_stopping_patience):
+        if pat >= args.early_stopping_patience:
             break
     model.load_state_dict(best_st)
     return best, be + 1, ep_ran, time.time() - t0
@@ -256,14 +260,14 @@ def main():
         return
 
     dev = torch.device(args.device if args.device != "cuda" or torch.cuda.is_available() else "cpu")
-    torch.manual_seed(args.seed); np.random.seed(args.seed)
 
     X, Y, grid_n = load_data(args.data_path, args.num_samples)
     print(f"Loaded nonlinear diffusion: samples={len(X)} grid={grid_n}  map (f,m)->u", flush=True)
     n = len(X)
-    ntr, nva = int(0.7 * n), int(0.2 * n)
-    Xtr, Xva, Xte = X[:ntr], X[ntr:ntr + nva], X[ntr + nva:]
-    Ytr, Yva, Yte = Y[:ntr], Y[ntr:ntr + nva], Y[ntr + nva:]
+    from AMOR.data.splits import seeded_split
+    tr, va, te = seeded_split(n, args.seed)
+    Xtr, Xva, Xte = X[tr], X[va], X[te]
+    Ytr, Yva, Yte = Y[tr], Y[va], Y[te]
     Xm = Xtr.mean((0, 2, 3), keepdims=True)
     Xs = Xtr.std((0, 2, 3), keepdims=True) + 1e-8
     Ym = Ytr.mean((0, 2, 3), keepdims=True)
@@ -275,18 +279,22 @@ def main():
     Yva = (Yva - Ym) / Ys
     Yte = (Yte - Ym) / Ys
 
+    from AMOR.data.splits import apply_weight_seed, shuffle_generator
     mk = lambda Xa, Ya, sh: DataLoader(
         TensorDataset(torch.from_numpy(Xa), torch.from_numpy(Ya)),
         batch_size=BATCH, shuffle=sh,
+        generator=shuffle_generator(args.seed) if sh else None,
     )
     tr, va, te = mk(Xtr, Ytr, True), mk(Xva, Yva, False), mk(Xte, Yte, False)
 
     dis_path = args.dis_rows_path or os.path.join(args.checkpoint_dir, "dis_rows.npz")
-    rb = fit_basis(args.basis_type, Xtr, Ytr, args.k_in, args.k_out, args.seed, False, 1.0, 1.0, dis_path)
+    learned = args.basis_type in LEARNED
+    basis_seed = args.seed
+    rb = fit_basis(args.basis_type, Xtr, Ytr, args.k_in, args.k_out, basis_seed, False, 1.0, 1.0, dis_path)
     kin, kout = min(args.k_in, rb.pca_in.n_components_), min(args.k_out, rb.pca_out.n_components_)
     if hasattr(rb, "truncate"):
         rb.truncate(kin, kout)
-    learned = args.basis_type in LEARNED
+    apply_weight_seed(args.seed)
     tag = args.tag
     if tag is None:
         tag = args.basis_type
@@ -301,7 +309,17 @@ def main():
         share_bases=not learned,
     )
     model.to(dev)
+    from AMOR.training.protocol_timing import maybe_run
     n_params = sum(p.numel() for p in model.parameters())
+    if maybe_run(
+        model, tr, dev,
+        lambda m, x, y: torch.nn.functional.l1_loss(m(x), y),
+        {"entry": os.environ.get("AMOR_PROTOCOL_ENTRY", f"nl_AMOR_{tag}"),
+         "dataset": tag, "model": "AMOR", "basis": args.basis_type,
+         "params": n_params, "precision": "fp32",
+         "block_checkpoint": os.environ.get("AMOR_BLOCK_CHECKPOINT", "1")},
+    ):
+        return
     n_blocks = model.n_nonlocal_blocks()
     print(
         f"AMOR ready tag={tag} k_in={kin} k_out={kout} layers={args.layers} "

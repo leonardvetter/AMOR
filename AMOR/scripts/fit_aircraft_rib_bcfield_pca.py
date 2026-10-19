@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from AMOR.models.PCAReducer import PCAReducerMultiChannel  # noqa: E402
-from AMOR.datasets.aircraft_rib import (  # noqa: E402
+from AMOR.data.aircraft_rib_dataset import (  # noqa: E402
     build_field_tensors,
     load_bcfield_dataset,
     normalize_per_channel,
