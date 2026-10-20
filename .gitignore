@@ -21,3 +21,5 @@ AMOR/data/aircraft_rib/aircraft_rib.step
 .cursor/
 **/jitfailure*/
 .DS_Store
+
+AMOR/data_efficiency/

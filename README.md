@@ -23,7 +23,6 @@ AMOR/
   training/             # shared loops, metrics, checkpoint helpers
   data/                 # generators and loaders (no binaries)
   scripts/              # train / eval / fit / timing entry points
-  data_efficiency/      # two-stage memory-efficiency experiment
   mesh_generalization/  # resolution-transfer experiment
 ```
 
@@ -82,7 +81,6 @@ On structured 2D benchmarks, AMOR and PCANet use `k_in = k_out = 144` and FNO us
 | Rib tip basis sweep | `python AMOR/scripts/train_amor_aircraft_rib.py --basis_type learned_qr` |
 | Rib bcfield / mixed | `python AMOR/scripts/fit_aircraft_rib_bcfield_pca.py --data_path …` then `train_amor_aircraft_rib.py --dataset bcfield --data_path … --checkpoint_dir … --pca_npz …` |
 | Mesh generalization | `python AMOR/mesh_generalization/run_mesh_generalization.py` |
-| Data efficiency | `python AMOR/data_efficiency/run_memory_efficiency.py` |
 | Geo-FNO airfoil / elasticity | `python AMOR/scripts/train_geofno.py --dataset {airfoil,elasticity} --seed 0 --data-dir /path/to/parent` |
 
 `train_kolmogorov.py` stores the published per-Reynolds width, depth, and PCA SVD solver in `RE_DEFAULTS`. All trainers keep `use_coordinates=False` and `use_batch_norm=False`. Rib tip defaults enable FiLM; pass `--no_film_conditioning` only if you intentionally disable it.
