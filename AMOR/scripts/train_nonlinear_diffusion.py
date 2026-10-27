@@ -317,8 +317,7 @@ def main():
             )
 
             # Resume: skip if already done
-            from AMOR.training.protocol_timing import maybe_run, protocol_requested
-            if os.path.exists(result_path) and not protocol_requested():
+            if os.path.exists(result_path) and not os.environ.get("AMOR_PROTOCOL_OUT"):
                 print(f"\n--- {model_name}: result exists, skipping ({result_path}) ---")
                 continue
 
@@ -328,7 +327,8 @@ def main():
             model = model_factory()
             n_params = sum(p.numel() for p in model.parameters())
             print(f"  Parameters: {n_params:,}")
-            if maybe_run(
+            from AMOR.training.torch_utils import run_external_protocol
+            if run_external_protocol(
                 model, train_loader, device,
                 lambda m, x, y: l1_loss(m(x), y),
                 {"entry": os.environ.get("AMOR_PROTOCOL_ENTRY", f"nl_{train_dataset_type}_{model_name}"),

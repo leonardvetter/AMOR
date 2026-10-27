@@ -66,6 +66,11 @@ class LearnableOrthonormalBasis(nn.Module):
         self._eval_components = None
         return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
+    def _load_from_state_dict(self, *args, **kwargs):
+        # A parent module's load_state_dict reaches this, not load_state_dict above.
+        self._eval_components = None
+        return super()._load_from_state_dict(*args, **kwargs)
+
     def _components_cached(self, build):
         """Reuse the orthonormal rows at inference. Training recomputes them."""
         if not self.training and self._eval_components is not None:

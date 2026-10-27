@@ -309,9 +309,9 @@ def main():
         share_bases=not learned,
     )
     model.to(dev)
-    from AMOR.training.protocol_timing import maybe_run
+    from AMOR.training.torch_utils import run_external_protocol
     n_params = sum(p.numel() for p in model.parameters())
-    if maybe_run(
+    if run_external_protocol(
         model, tr, dev,
         lambda m, x, y: torch.nn.functional.l1_loss(m(x), y),
         {"entry": os.environ.get("AMOR_PROTOCOL_ENTRY", f"nl_AMOR_{tag}"),

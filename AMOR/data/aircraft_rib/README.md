@@ -3,6 +3,12 @@
 Generators for the aircraft-rib linear-elasticity NPZ datasets.
 **Dataset binaries are not in git**; download from the project Zenodo release.
 
+This mesh and the three load cases are a numerical test of AMOR on an
+irregular 3D geometry. They are inspired by published aircraft-rib
+structural tests, not a mesh of any one experiment, and they are not
+intended as a faithful digital twin. Geometric and loading details
+are therefore only as specific as the test requires.
+
 The rib STEP CAD file is **not** redistributed in this repository (third-party geometry cited in the paper). Place a local copy if you rebuild the mesh, e.g. as `$AMOR_MESHES_DIR/aircraft_rib.step`.
 
 Env: `AMOR_DATA_ROOT`, `AMOR_SCRATCH_DATA`, `AMOR_MESHES_DIR`, `AMOR_RIB_DATASETS` (`AMOR/paths.py`).

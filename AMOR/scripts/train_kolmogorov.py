@@ -225,8 +225,8 @@ def main():
         print("=" * 70)
         n_params = sum(p.numel() for p in model.parameters())
         print(f"{model_name} Parameters: {n_params:,}")
-        from AMOR.training.protocol_timing import maybe_run
-        if maybe_run(
+        from AMOR.training.torch_utils import run_external_protocol
+        if run_external_protocol(
             model, train_loader, device,
             lambda m, x, y: torch.nn.functional.l1_loss(x + args.dt * m(x), y),
             {"entry": os.environ.get("AMOR_PROTOCOL_ENTRY", f"kolm_Re{args.re}_{model_name}"),

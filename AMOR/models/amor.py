@@ -110,14 +110,11 @@ class ReducedBasisBlock(nn.Module):
         use_batch_norm: If True, apply batch normalization in latent space
         add_constant_mode: If True, append constant basis vector to PCA modes
         use_factorized_weights: If True or 'auto', use factorized weight representation
-            for reduced parameter count (note: not algebraically equivalent,
-            but less paramters). If 'auto', automatically uses factorized weights
-            when encoder_dim × decoder_dim > use_factorized_weights_auto_threshold
+            for reduced parameter count (not algebraically equivalent to a dense
+            map). If 'auto', use factorized weights when
+            encoder_dim × decoder_dim > use_factorized_weights_auto_threshold.
         use_factorized_weights_auto_threshold: Threshold for auto mode
-            (default: 10000, i.e., k_in × k_out > 10000). If 'auto', automatically uses factorized weights
-            when encoder_dim × decoder_dim > use_factorized_weights_auto_threshold
-        use_factorized_weights_auto_threshold: Threshold for auto mode
-            (default: 10000, i.e., k_in × k_out > 10000)
+            (default 10000).
     
     Shape:
         - Input: (B, width, input_dim) where input_dim depends on encoder basis

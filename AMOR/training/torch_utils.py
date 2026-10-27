@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
+
+
+def run_external_protocol(model, loader, device, loss_fn, meta) -> bool:
+    """Run the in-repo timing protocol when AMOR_PROTOCOL_OUT is set."""
+    if not os.environ.get("AMOR_PROTOCOL_OUT"):
+        return False
+    from AMOR.training.protocol_timing import maybe_run
+
+    return maybe_run(model, loader, device, loss_fn, meta)
 
 
 def unwrap_compiled(model: torch.nn.Module) -> torch.nn.Module:

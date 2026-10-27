@@ -320,8 +320,8 @@ def main():
     params = sum(p.numel() for p in model.parameters())
     n_blocks = model.n_nonlocal_blocks()
     print(f"Parameters: {params:,}  blocks={n_blocks}")
-    from AMOR.training.protocol_timing import maybe_run
-    if maybe_run(
+    from AMOR.training.torch_utils import run_external_protocol
+    if run_external_protocol(
         model, train_loader, device,
         lambda m, x, y: torch.nn.functional.l1_loss(x + args.dt * m(x), y),
         {"entry": os.environ.get("AMOR_PROTOCOL_ENTRY", f"kolm_AMOR_{args.basis_type}"),

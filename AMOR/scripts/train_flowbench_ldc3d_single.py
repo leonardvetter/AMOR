@@ -194,7 +194,13 @@ def parse_args():
     p.add_argument("--k-in", type=int, default=None, help="Fixed AMOR input PCA modes")
     p.add_argument("--k-out", type=int, default=None, help="Fixed AMOR output PCA modes")
     p.add_argument("--run-tag", default=None, help="Suffix for result/log filenames (e.g. k150_k20)")
-    p.add_argument("--seed", type=int, default=None, help="Weight seed. The geometry split stays at 42.")
+    p.add_argument("--seed", type=int, default=None, help="Run seed for initialization, batch order, geometry split, and basis RNG.")
+    p.add_argument(
+        "--split-seed",
+        type=int,
+        default=None,
+        help="Seed for the geometry split and basis RNG (default: --seed).",
+    )
     p.add_argument(
         "--resume-from",
         default=None,
@@ -276,6 +282,9 @@ def main():
         hyperparams["batch_size"] = args.batch_size
     if args.seed is not None:
         hyperparams["seed"] = int(args.seed)
+    hyperparams["split_seed"] = int(
+        args.split_seed if args.split_seed is not None else hyperparams["seed"]
+    )
     if args.k_in is not None:
         hyperparams["k_in"] = args.k_in
     if args.k_out is not None:
@@ -318,8 +327,7 @@ def main():
 
     os.makedirs(args.results_dir, exist_ok=True)
     result_path = os.path.join(args.results_dir, f"{file_stem}_results.json")
-    from AMOR.training.protocol_timing import protocol_requested
-    if os.path.exists(result_path) and not args.dry_run and not protocol_requested():
+    if os.path.exists(result_path) and not args.dry_run and not os.environ.get("AMOR_PROTOCOL_OUT"):
         print(f"Result exists: {result_path}\nDelete to re-run.")
         sys.exit(0)
 
@@ -339,7 +347,7 @@ def main():
         geom,
         train_frac=hyperparams["train_frac"],
         val_frac=hyperparams["val_frac"],
-        seed=int(hyperparams["seed"]),
+        seed=int(hyperparams["split_seed"]),
     )
     print_training_summary(args, split, x_mmap, y_mmap, hyperparams)
 
@@ -396,7 +404,7 @@ def main():
                     int(k_in_fixed),
                     int(k_out_fixed),
                     laplacian_periodic=hyperparams["laplacian_periodic"],
-                    random_state=int(hyperparams["seed"]),
+                    random_state=int(hyperparams["split_seed"]),
                 )
                 rb.save(basis_path)
                 log_event(
@@ -422,7 +430,7 @@ def main():
                 if k_in_fixed is not None and k_out_fixed is not None:
                     min_pca_out = max(int(k_in_fixed), int(k_out_fixed))
                 mmap_dir = os.environ.get("TMPDIR", "/tmp")
-                rb = PCAReducerVolume(random_state=int(hyperparams["seed"])).fit_from_mmap(
+                rb = PCAReducerVolume(random_state=int(hyperparams["split_seed"])).fit_from_mmap(
                     x_mmap,
                     y_mmap,
                     split.train_idx,
@@ -481,11 +489,11 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     mem_mb = model_memory_mb(n_params)
     print(f"Parameters: {n_params:,}  model_mem={mem_mb:.2f} MiB")
-    if protocol_requested():
+    if os.environ.get("AMOR_PROTOCOL_OUT"):
         from AMOR.training.loop3d import relative_l1_loss
-        from AMOR.training.protocol_timing import maybe_run
+        from AMOR.training.torch_utils import run_external_protocol
         model = model.to(device)
-        maybe_run(
+        run_external_protocol(
             model, loaders["train"], device,
             lambda m, x, y: relative_l1_loss(m(x), y),
             {"entry": os.environ.get("AMOR_PROTOCOL_ENTRY", f"flowbench_{args.model}"),
