@@ -10,7 +10,7 @@ Code for the paper [*AMOR: Adaptive Modal Operator Refinement for Operator Learn
 There is **one** AMOR implementation: `AMOR.models.amor.AMOR`. Mass weighting, FiLM, coordinates, 2D/3D layout, and trainable QR/Cayley bases are constructor options.
 
 <p align="center">
-  <img src="docs/figures/graphical_abstract.png" alt="AMOR graphical abstract" width="900">
+  <img src="docs/figures/AMOR_graphical_abstract-1.png" alt="AMOR graphical abstract" width="900">
 </p>
 <p align="center"><em>Graphical abstract.</em></p>
 
