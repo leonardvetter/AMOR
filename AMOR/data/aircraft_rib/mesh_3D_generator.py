@@ -493,7 +493,7 @@ def generate_mesh_pair(step_file: str, output_dir: str = "meshes_3d",
     print(f"{'='*60}")
     print(f"\n  Coarse FEM DOFs (3D displacement): ~{3*nc:,}")
     print(f"  Fine FEM DOFs (3D displacement):   ~{3*nf:,}")
-    print(f"\n  Estimated FEM solve time per sample (hyperelasticity, Newton):")
+    print(f"\n  Estimated FEM solve time per sample (linear elasticity):")
     print(f"    Coarse: ~{max(0.5, 3*nc/30000):.1f}s  "
           f"→ 5k samples ≈ {max(1, 3*nc/30000 * 5000 / 3600):.0f}h")
     print(f"    Fine:   ~{max(1, 3*nf/30000):.1f}s  "

@@ -1,5 +1,5 @@
 """
-Aircraft Rib: Boundary Marking & Hyperelasticity Problem Setup
+Aircraft Rib: Boundary Marking & Linear Elasticity Problem Setup
 ================================================================
 Identifies Γ_D (clamped spar face), Γ_N (loaded trailing edge face),
 and Γ_free (everything else = do-nothing) on a 3D tet mesh.
@@ -260,8 +260,8 @@ def _extract_surface_triangles(elements: np.ndarray) -> np.ndarray:
 
 def generate_marked_mesh(step_file: str, mesh_size_min: float = 1.0,
                          mesh_size_max: float = 6.0,
-                         dirichlet_chord_frac: tuple = (0.8, 0.95),
-                         neumann_chord_frac: tuple = (0.05, 0.2),
+                         dirichlet_chord_frac: tuple = (0.8, 1.0),
+                         neumann_chord_frac: tuple = (0.0, 0.2),
                          clamp_depth_frac: float = 0.10,
                          neumann_z_tol_frac: float = 0.005,
                          neumann_normal_threshold: float = -0.7,
@@ -498,21 +498,20 @@ def print_pde_summary(boundaries):
 
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
-║  HYPERELASTICITY PROBLEM ON AIRCRAFT RIB                    ║
+║  LINEAR ELASTICITY PROBLEM ON AIRCRAFT RIB                  ║
 ╠══════════════════════════════════════════════════════════════╣
 ║                                                              ║
 ║  Strong form:                                                ║
-║    -div(P(F)) = 0          in Ω     (equilibrium)           ║
+║    -div(σ(u)) = 0          in Ω     (equilibrium)           ║
 ║                                                              ║
 ║  where:                                                      ║
-║    F = I + ∇u              (deformation gradient)            ║
-║    P = ∂W/∂F               (1st Piola-Kirchhoff stress)      ║
-║    W = W(F; E(x))          (strain energy, depends on E(x))  ║
+║    ε = sym(∇u)             (infinitesimal strain)            ║
+║    σ = λ tr(ε) I + 2μ ε    (Hooke)                           ║
 ║                                                              ║
 ║  Boundary conditions:                                        ║
 ║    u = 0         on Γ_D  (upper spar face, {n_d:>5} nodes)       ║
-║    P·N = t_k     on Γ_N  (trailing edge tip, {n_n:>4} nodes)      ║
-║    P·N = 0       on Γ_free (all remaining surfaces)          ║
+║    σ·n = t_k     on Γ_N  (trailing edge tip, {n_n:>4} nodes)      ║
+║    σ·n = 0       on Γ_free (all remaining surfaces)          ║
 ║                                                              ║
 ║  Geometry:                                                   ║
 ║    Γ_D = spar end face, upper portion only (spar cap clamp)  ║
@@ -520,7 +519,6 @@ def print_pde_summary(boundaries):
 ║    Γ_free = web, flanges, holes, stiffeners, lower spar face ║
 ║                                                              ║
 ║  Material:                                                   ║
-║    Neo-Hookean:  W = (μ/2)(I₁-3) - μ ln(J) + (λ/2)(ln J)²  ║
 ║    μ(x) = E(x) / (2(1+ν))                                   ║
 ║    λ(x) = E(x)·ν / ((1+ν)(1-2ν))                            ║
 ║                                                              ║
@@ -542,7 +540,7 @@ def print_pde_summary(boundaries):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(
-        description="Boundary marking for aircraft rib hyperelasticity")
+        description="Boundary marking for aircraft rib linear elasticity")
     p.add_argument("--input", "-i", type=str, default=None,
                    help="STEP file (generates new marked mesh)")
     p.add_argument("--npz", type=str, default=None,

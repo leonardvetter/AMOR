@@ -28,7 +28,7 @@ Env: `AMOR_DATA_ROOT`, `AMOR_SCRATCH_DATA`, `AMOR_MESHES_DIR`, `AMOR_RIB_DATASET
 ```bash
 cd AMOR/data/aircraft_rib
 python3 mesh_3D_generator.py -i /path/to/aircraft_rib.step --preset neural_operator \
-  -o $AMOR_MESHES_DIR/rib_h15.0
+  --min-size 2.5 --max-size 15.0 -o $AMOR_MESHES_DIR/rib_h15.0
 python3 boundary_marking.py --npz $AMOR_MESHES_DIR/rib_h15.0_arrays.npz \
   --export --output-dir $AMOR_MESHES_DIR
 # then generate_* scripts; see --help on each
