@@ -261,7 +261,7 @@ Training schedules in the structured-grid scripts are AdamW $2\cdot10^{-3}$, wei
 If you use this code, please cite the paper and this repository. If you use a dataset, please also cite that dataset.
 
 ```bibtex
-@misc{voderholzer2026amor,
+@misc{voderholzervetter2026amor,
   author        = {Voderholzer, David and Vetter, Leonard and O'Leary-Roseberry, Thomas},
   title         = {{AMOR}: Adaptive Modal Operator Refinement for Operator Learning on Arbitrary Meshes and Irregular {3D} Geometries},
   year          = {2026},
@@ -270,13 +270,13 @@ If you use this code, please cite the paper and this repository. If you use a da
   primaryClass  = {cs.LG},
   doi           = {10.48550/arXiv.2610.37485}
 }
-@software{voderholzer2026amor_code,
-  author = {Voderholzer, David and Vetter, Leonard and O'Leary-Roseberry, Thomas},
+@software{voderholzervetter2026amor_code,
+  author = {Vetter, Leonard and Voderholzer, David and O'Leary-Roseberry, Thomas},
   title  = {Adaptive Modal Operator Refinement ({AMOR})},
   year   = {2026},
   url    = {https://github.com/leonardvetter/AMOR}
 }
-@dataset{voderholzer2026amor_data,
+@dataset{voderholzervetter2026amor_data,
   author    = {Voderholzer, David and Vetter, Leonard},
   title     = {{AMOR} Datasets},
   year      = {2026},
