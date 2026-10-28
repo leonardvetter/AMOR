@@ -209,8 +209,7 @@ python AMOR/data/generate_helmholtz.py --preset standard      # sigma=0.4, rho=0
 # 3D elastostatics
 python AMOR/data/3D_elastostatics.py --help
 
-# Aircraft rib (STEP is not redistributed; cite the paper and place a local copy)
-# See AMOR/data/aircraft_rib/README.md
+# Aircraft rib: see AMOR/data/aircraft_rib/README.md
 ```
 
 ## Apply AMOR to a new problem
@@ -295,78 +294,6 @@ If you use this code, please cite the paper and this repository. If you use a da
 - **Helmholtz data generation**: hIPPYflow (O'Leary-Roseberry and Villa, Zenodo, DOI [10.5281/zenodo.4608729](https://doi.org/10.5281/zenodo.4608729)), built on hIPPYlib.
 - **Baselines**: FNO (Li et al., ICLR 2021) via the `neuraloperator` library (Kossaifi et al., JMLR 27(205), 2026); PCANet (Bhattacharya et al., SMAI Journal of Computational Mathematics 7, 2021); published DSE results (Lingsch et al., ICML 2024).
 
-```bibtex
-@inproceedings{li2022dissipative,
-  author    = {Li, Zongyi and Liu-Schiaffini, Miguel and Kovachki, Nikola and Azizzadenesheli, Kamyar and Liu, Burigede and Bhattacharya, Kaushik and Stuart, Andrew and Anandkumar, Anima},
-  title     = {Learning dissipative dynamics in chaotic systems},
-  booktitle = {Advances in Neural Information Processing Systems},
-  volume    = {35},
-  pages     = {16768--16781},
-  year      = {2022}
-}
-@misc{li2023dissipative_data,
-  author = {Li, Zongyi and Liu-Schiaffini, Miguel and Kovachki, Nikola and Azizzadenesheli, Kamyar and Liu, Burigede and Bhattacharya, Kaushik and Stuart, Andrew and Anandkumar, Anima},
-  title  = {Learning dissipative dynamics in chaotic systems (datasets)},
-  year   = {2023},
-  doi    = {10.5281/zenodo.7495555}
-}
-@article{tali2025flowbench,
-  author  = {Tali, Ronak and Rabeh, Ali and Yang, Cheng-Hau and Shadkhah, Mehdi and Karki, Samundra and Upadhyaya, Abhisek and Dhakshinamoorthy, Suriya and Saadati, Marjan and Sarkar, Soumik and Krishnamurthy, Adarsh and Hegde, Chinmay and Balu, Aditya and Ganapathysubramanian, Baskar},
-  title   = {{FlowBench}: A Large Scale Benchmark for Flow Simulation over Complex Geometries},
-  journal = {Journal of Data-centric Machine Learning Research},
-  year    = {2025},
-  url     = {https://data.mlr.press/assets/pdf/v02-14.pdf}
-}
-@article{li2023geofno,
-  author  = {Li, Zongyi and Huang, Daniel Zhengyu and Liu, Burigede and Anandkumar, Anima},
-  title   = {Fourier Neural Operator with Learned Deformations for {PDE}s on General Geometries},
-  journal = {Journal of Machine Learning Research},
-  volume  = {24},
-  number  = {388},
-  pages   = {1--26},
-  year    = {2023}
-}
-@misc{olearyroseberry2021hippyflow,
-  author = {O'Leary-Roseberry, Thomas and Villa, Umberto},
-  title  = {{hIPPYflow}: Dimension Reduced Surrogate Construction for Parametric {PDE} Maps in {P}ython},
-  year   = {2021},
-  doi    = {10.5281/zenodo.4608729}
-}
-@inproceedings{li2021fno,
-  author    = {Li, Zongyi and Kovachki, Nikola and Azizzadenesheli, Kamyar and Liu, Burigede and Bhattacharya, Kaushik and Stuart, Andrew and Anandkumar, Anima},
-  title     = {Fourier Neural Operator for Parametric Partial Differential Equations},
-  booktitle = {International Conference on Learning Representations},
-  year      = {2021}
-}
-@article{kossaifi2026neuraloperator,
-  author  = {Kossaifi, Jean and Kovachki, Nikola and Li, Zongyi and Pitt, David and Liu-Schiaffini, Miguel and George, Robert Joseph and Bonev, Boris and Azizzadenesheli, Kamyar and Berner, Julius and Duruisseaux, Valentin and Anandkumar, Anima},
-  title   = {A Library for Learning Neural Operators},
-  journal = {Journal of Machine Learning Research},
-  volume  = {27},
-  number  = {205},
-  pages   = {1--6},
-  year    = {2026}
-}
-@article{bhattacharya2021pcanet,
-  author  = {Bhattacharya, Kaushik and Hosseini, Bamdad and Kovachki, Nikola B. and Stuart, Andrew M.},
-  title   = {Model Reduction and Neural Networks for Parametric {PDE}s},
-  journal = {The SMAI Journal of Computational Mathematics},
-  volume  = {7},
-  pages   = {121--157},
-  year    = {2021},
-  doi     = {10.5802/smai-jcm.74}
-}
-@inproceedings{lingsch2024dse,
-  author    = {Lingsch, Levi E. and Michelis, Mike Y. and de B{\'e}zenac, Emmanuel and Perera, Sirani M. and Katzschmann, Robert K. and Mishra, Siddhartha},
-  title     = {Beyond Regular Grids: {F}ourier-Based Neural Operators on Arbitrary Domains},
-  booktitle = {Proceedings of the 41st International Conference on Machine Learning},
-  series    = {Proceedings of Machine Learning Research},
-  volume    = {235},
-  pages     = {30610--30629},
-  year      = {2024}
-}
-```
-
 ## License
 
-Released under the [LICENSE NAME] license; see `LICENSE`.
+Released under the MIT License; see `LICENSE`.
