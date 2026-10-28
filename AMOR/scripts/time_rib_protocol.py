@@ -2,7 +2,7 @@
 
 The historical PCA bundle for the distributed-aero checkpoint is not on disk.
 Inference uses the current AMOR graph at that checkpoint's sizes: 72615 nodes,
-4 input and 3 output channels, k 15/2, width 24, 5 nonlocal blocks, dense T,
+4 input and 3 output channels, k 15/2, width 24, 4 nonlocal blocks, dense T,
 FiLM on (nu, load case). Residual blocks in the June checkpoint stored an
 input-side encoder; the current code encodes the output side, so this times
 the current graph, not a bit-identical replay of that file.
@@ -42,7 +42,7 @@ class _RB:
 
 def _time_inference(device, out_dir: Path):
     model = AMOR(
-        width=24, rb=_RB(), k_in=15, k_out=2, layers=5, dropout=0.0, init_scale=0.1,
+        width=24, rb=_RB(), k_in=15, k_out=2, layers=4, dropout=0.0, init_scale=0.1,
         use_skip_connections=True, use_batch_norm=False, use_coordinates=False,
         use_factorized_weights=False, share_bases=False,
         use_film_conditioning=True, film_hidden=64, film_in_dim=2,

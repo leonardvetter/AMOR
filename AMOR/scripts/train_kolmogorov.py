@@ -173,7 +173,7 @@ def build_models(args, rb, k_in, k_out):
                 use_batch_norm=False,
                 use_coordinates=False,
                 add_constant_mode=False,
-                use_factorized_weights=False,
+                use_factorized_weights="auto",
             )
         else:
             model = PCANet(

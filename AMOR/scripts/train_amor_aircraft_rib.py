@@ -801,7 +801,7 @@ def main() -> None:
         if args.width is None:
             args.width = 16
         if args.layers is None:
-            args.layers = 5
+            args.layers = 4
         if args.k_in is None:
             args.k_in = 100
         if args.k_out is None:
@@ -824,9 +824,9 @@ def main() -> None:
         if args.layers is None:
             args.layers = 4
         if args.k_in is None:
-            args.k_in = 80
+            args.k_in = 15
         if args.k_out is None:
-            args.k_out = 40
+            args.k_out = 2
         if args.time_buffer_sec is None:
             args.time_buffer_sec = 900.0
         if args.use_solve_ok_only is None:

@@ -278,7 +278,7 @@ def main():
                 use_batch_norm=False,
                 use_coordinates=False,
                 add_constant_mode=False,
-                use_factorized_weights=False,
+                use_factorized_weights="auto",
             )
 
         def make_fno():

@@ -166,8 +166,8 @@ def main():
     parser.add_argument("--early_stopping_patience", type=int, default=50)
     parser.add_argument("--dt", type=float, default=1.0)
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--k_in", type=int, default=100)
-    parser.add_argument("--k_out", type=int, default=100)
+    parser.add_argument("--k_in", type=int, default=144)
+    parser.add_argument("--k_out", type=int, default=144)
     parser.add_argument("--width", type=int, default=24)
     parser.add_argument("--layers", type=int, default=4)
     parser.add_argument(

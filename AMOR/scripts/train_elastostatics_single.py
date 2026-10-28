@@ -2,7 +2,7 @@
 """Train FNO or AMOR on 3D elastostatics: E(x) -> (ux,uy,uz).
 
 Recommended fair compare (from timing probe):
-  N=32, layers=4, FNO modes=12^3, AMOR pca_j=0.99, width in {24,32}.
+  N=64, layers=4, FNO modes=12^3, AMOR pca_j=0.999, width 24.
 
 Optimizer/schedule: AdamW 2e-3, wd 1e-4, L1, cosine annealing (see train_3d_common).
 """
@@ -94,7 +94,7 @@ def run_prefix(N: int, model: str, hyperparams: dict) -> str:
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model", required=True, choices=["FNO", "AMOR"])
-    p.add_argument("--N", type=int, default=32, help="grid size (32/64/128)")
+    p.add_argument("--N", type=int, default=64, help="grid size (32/64/128)")
     p.add_argument("--data-path", default=None)
     p.add_argument("--results-dir", default=None)
     p.add_argument("--dry-run", action="store_true")
@@ -109,8 +109,8 @@ def parse_args():
     p.add_argument(
         "--split-seed",
         type=int,
-        default=None,
-        help="Seed for the sample split, normalization set, and PCA RNG (default: --seed).",
+        default=42,
+        help="Seed for the sample split, normalization set, and PCA RNG (default: 42).",
     )
     p.add_argument(
         "--factorized-weights",
@@ -120,8 +120,8 @@ def parse_args():
     )
     p.add_argument("--train-frac", type=float, default=None)
     p.add_argument("--val-frac", type=float, default=None)
-    p.add_argument("--pca-j", type=float, default=0.99,
-                   help="AMOR variance fraction (default 0.99)")
+    p.add_argument("--pca-j", type=float, default=0.999,
+                   help="AMOR variance fraction (default 0.999)")
     p.add_argument("--fno-modes", type=int, default=12,
                    help="FNO modes per axis (default 12)")
     p.add_argument("--k-in", type=int, default=None)
@@ -145,8 +145,8 @@ def main():
 
     hyperparams = dict(HYPERPARAMETERS)
     hyperparams["fno_modes"] = (12, 12, 12)
-    hyperparams["pca_j_in"] = 0.99
-    hyperparams["pca_j_out"] = 0.99
+    hyperparams["pca_j_in"] = 0.999
+    hyperparams["pca_j_out"] = 0.999
     hyperparams.pop("pca_eps", None)
 
     if args.epochs is not None:

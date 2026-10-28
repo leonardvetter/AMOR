@@ -35,8 +35,8 @@ from AMOR.training.torch_utils import (
 HYPERPARAMETERS = {
     "layers": 4,
     "width": 24,
-    "pca_j_in": 0.99,
-    "pca_j_out": 0.99,
+    "pca_j_in": 0.999,
+    "pca_j_out": 0.999,
     "pca_eps": None,
     "fno_modes": (12, 12, 12),
     "lr": 2e-3,
@@ -53,7 +53,7 @@ HYPERPARAMETERS = {
     "num_workers": 0,
     "pca_batch_size": 5,
     "use_factorized_weights": False,
-    "use_factorized_weights_auto_threshold": 1000,
+    "use_factorized_weights_auto_threshold": 10000,
 }
 
 RESULTS_ROOT = expand("${AMOR_DATA_ROOT}/3d_elastostatics/model_comparison")
@@ -212,7 +212,7 @@ def build_model(model_name: str, x_mmap, y_mmap, rb: PCAReducerVolume | None, hy
             tag = f"eps={eps:g}" if eps is not None else f"j_in={j_in}, j_out={j_out}"
         print(f"  AMOR PCA modes: k_in={k_in} k_out={k_out} ({tag})")
         fw = hyperparams.get("use_factorized_weights", False)
-        fw_thr = hyperparams.get("use_factorized_weights_auto_threshold", 1000)
+        fw_thr = hyperparams.get("use_factorized_weights_auto_threshold", 10000)
         core = AMOR(
             width=hyperparams["width"],
             rb=rb,

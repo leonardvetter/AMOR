@@ -142,25 +142,26 @@ After downloading Zenodo into `$AMOR_DATA_ROOT`, the trainers expect names such 
 
 On structured 2D benchmarks, AMOR and PCANet use `k_in = k_out = 144` and FNO uses `12×12` Fourier modes unless a trainer overrides them. Width and depth follow each script (paper, Table B.8). AMOR `layers` is the **total** number of nonlocal blocks including the input→output transition (`block0` + transition + `layers-2` output residual blocks). Reported `test_rel_l1` / `test_rel_l2` are relative errors in physical units after undoing the train-set z-score.
 
-As in the paper (Sec. 3.2 and Appendix B.2), coefficient tensors are factorized whenever $k_{\mathrm{enc}}k_{\mathrm{dec}}>10^4$; all reported AMOR runs use factorized tensors except Elastostatics and the aircraft rib. On the 2D benchmarks (`k_in k_out = 144^2 > 10^4`), pass `--use_factorized_weights true` to the `train_amor_*_basis.py` entry points. `AMOR.models.amor.AMOR` defaults to `use_factorized_weights="auto"` with threshold `10000`; FlowBench uses `auto` with threshold `1000`, which also selects factorized tensors for the reported ranks $360\times100$. Geo-FNO training forces factorized tensors. `train_helmholtz.py`, `train_nonlinear_diffusion.py`, and `train_kolmogorov.py` pass `use_factorized_weights=False` for AMOR; use them only for the FNO and PCANet baselines.
+As in the paper (Sec. 3.2 and Appendix B.2), coefficient tensors are factorized whenever $k_{\mathrm{enc}}k_{\mathrm{dec}}>10^4$; all reported AMOR runs use factorized tensors except Elastostatics and the aircraft rib. `AMOR.models.amor.AMOR` defaults to `use_factorized_weights="auto"` with threshold `10000`. Helmholtz, nonlinear diffusion, Kolmogorov, and FlowBench use that rule, so $144^2$ and $360\times100$ are factorized. Geo-FNO training forces factorized tensors. Basis ablations pass `--use_factorized_weights true` to the `train_amor_*_basis.py` entry points.
 
 | Experiment | Command |
 |---|---|
-| Helmholtz AMOR (reported) | `python AMOR/scripts/train_amor_helmholtz_basis.py --variant sigma_0.2_rho_0.4 --basis_type pca --use_factorized_weights true` |
-| Helmholtz FNO / PCANet | `python AMOR/scripts/train_helmholtz.py --dataset sigma_0.2_rho_0.4 --model FNO` |
-| Nonlinear diffusion AMOR (reported) | `python AMOR/scripts/train_amor_nonlinear_diffusion_basis.py --basis_type pca --use_factorized_weights true` |
-| Nonlinear diffusion FNO / PCANet | `python AMOR/scripts/train_nonlinear_diffusion.py --model FNO` |
-| Kolmogorov AMOR (reported) | `python AMOR/scripts/train_amor_kolmogorov_Re40_basis.py --basis_type pca --layers 4 --width 24 --use_factorized_weights true --data_path $AMOR_DATA_ROOT/2D_NS_Re40.npy` |
-| Kolmogorov FNO / PCANet | `python AMOR/scripts/train_kolmogorov.py --re {40,500,5000} --models FNO` |
+| Helmholtz AMOR (reported) | `python AMOR/scripts/train_amor_helmholtz_basis.py --variant {sigma_0.1_rho_0.6,sigma_0.2_rho_0.4,sigma_0.4_rho_0.2} --basis_type pca --use_factorized_weights true` |
+| Helmholtz FNO / PCANet | `python AMOR/scripts/train_helmholtz.py --dataset {sigma_0.1_rho_0.6,sigma_0.2_rho_0.4,sigma_0.4_rho_0.2} --model {FNO,PCANet}` |
+| Nonlinear diffusion AMOR (reported) | `python AMOR/scripts/train_nonlinear_diffusion.py --model AMOR` |
+| Nonlinear diffusion FNO / PCANet | `python AMOR/scripts/train_nonlinear_diffusion.py --model {FNO,PCANet}` |
+| Kolmogorov AMOR (reported) | `python AMOR/scripts/train_kolmogorov.py --re {40,500,5000} --models AMOR` |
+| Kolmogorov FNO / PCANet | `python AMOR/scripts/train_kolmogorov.py --re {40,500,5000} --models {FNO,PCANet}` |
 | Basis ablations (2D) | `python AMOR/scripts/train_amor_{helmholtz,kolmogorov_Re40,nonlinear_diffusion}_basis.py --basis_type …` |
 | DIS bases | `python AMOR/scripts/fit_{helmholtz,nonlinear_diffusion}_dis_basis.py` |
-| Elastostatics accuracy | `python AMOR/scripts/train_elastostatics_single.py --model AMOR --N 64 --data-path $AMOR_SCRATCH_DATA/3d_elastostatics/elastostatics3d_N64_n1000.npz --pca-j 0.999 --train-frac 0.7 --val-frac 0.2` |
+| Elastostatics accuracy | `python AMOR/scripts/train_elastostatics_single.py --model {AMOR,FNO} --N 64 --data-path $AMOR_SCRATCH_DATA/3d_elastostatics/elastostatics3d_N64_n1000.npz --pca-j 0.999 --train-frac 0.7 --val-frac 0.2`. Extra seeds: `--seed S` (split seed stays 42). |
 | Elastostatics timing | `python AMOR/scripts/bench_elastostatics_timing_scaling.py` |
 | FlowBench LDC 3D | `python AMOR/scripts/train_flowbench_ldc3d_single.py --model AMOR --basis-type laplacian --k-in 360 --k-out 100 --no-block-checkpoint` |
 | FlowBench, extra seeds on split 42 | same, plus `--seed S --split-seed 42` |
-| Aircraft rib tip (mass-PCA) | `python AMOR/scripts/train_amor_aircraft_rib.py --dataset cantilever_tip` |
+| Aircraft rib tip (mass-PCA) | `python AMOR/scripts/train_amor_aircraft_rib.py --dataset cantilever_tip --k_in 100 --k_out 30 --width 16 --layers 4` |
 | Rib tip basis sweep | `python AMOR/scripts/train_amor_aircraft_rib.py --basis_type learned_qr` |
-| Rib bcfield / mixed | `python AMOR/scripts/fit_aircraft_rib_bcfield_pca.py --data_path …` then `train_amor_aircraft_rib.py --dataset bcfield --data_path … --checkpoint_dir … --pca_npz …` |
+| Rib distributed aero / mixed | `python AMOR/scripts/fit_aircraft_rib_bcfield_pca.py --data_path …` then `train_amor_aircraft_rib.py --dataset bcfield --k_in 15 --k_out 2 --width 24 --layers 4 --data_path … --checkpoint_dir … --pca_npz …` |
+| Rib multipatch bracket | same, with `--k_in 30 --k_out 5 --width 32 --layers 5` |
 | Mesh generalization | `python AMOR/mesh_generalization/run_mesh_generalization.py` |
 | Geo-FNO airfoil / elasticity | `python AMOR/scripts/train_geofno.py --dataset {airfoil,elasticity} --seed 0 --data-dir /path/to/parent` |
 

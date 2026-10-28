@@ -96,9 +96,11 @@ HYPERPARAMETERS = {
     "test_frac": 0.1,
     "num_workers": 0,
     "use_factorized_weights": "auto",
-    "use_factorized_weights_auto_threshold": 1000,
+    "use_factorized_weights_auto_threshold": 10000,
+    "k_in": 360,
+    "k_out": 100,
     "share_bases": True,
-    "basis_type": "pca",
+    "basis_type": "laplacian",
     "laplacian_periodic": False,
     "trainable_basis": False,
     "trainable_basis_param": "qr",
@@ -146,7 +148,7 @@ def build_model(model_name: str, x_mmap, rb: PCAReducerVolume | None, hyperparam
             )
         )
         fw = hyperparams.get("use_factorized_weights", "auto")
-        fw_thr = hyperparams.get("use_factorized_weights_auto_threshold", 1000)
+        fw_thr = hyperparams.get("use_factorized_weights_auto_threshold", 10000)
         trainable = bool(hyperparams.get("trainable_basis", False))
         share = bool(hyperparams.get("share_bases", True)) and not trainable
         print(
@@ -191,15 +193,15 @@ def parse_args():
         help="early-stopping patience (default from HYPERPARAMETERS)",
     )
     p.add_argument("--batch-size", type=int, default=None)
-    p.add_argument("--k-in", type=int, default=None, help="Fixed AMOR input PCA modes")
-    p.add_argument("--k-out", type=int, default=None, help="Fixed AMOR output PCA modes")
+    p.add_argument("--k-in", type=int, default=360, help="Fixed AMOR input modes")
+    p.add_argument("--k-out", type=int, default=100, help="Fixed AMOR output modes")
     p.add_argument("--run-tag", default=None, help="Suffix for result/log filenames (e.g. k150_k20)")
-    p.add_argument("--seed", type=int, default=None, help="Run seed for initialization, batch order, geometry split, and basis RNG.")
+    p.add_argument("--seed", type=int, default=None, help="Run seed for initialization and batch order.")
     p.add_argument(
         "--split-seed",
         type=int,
-        default=None,
-        help="Seed for the geometry split and basis RNG (default: --seed).",
+        default=42,
+        help="Seed for the geometry split and basis RNG (default: 42).",
     )
     p.add_argument(
         "--resume-from",
@@ -216,12 +218,12 @@ def parse_args():
         "--factorized-threshold",
         type=int,
         default=None,
-        help="auto factorized when k_in*k_out exceeds this (default 1000)",
+        help="auto factorized when k_in*k_out exceeds this (default 10000)",
     )
     p.add_argument(
         "--basis-type",
         choices=["pca", "laplacian", "learned_qr"],
-        default="pca",
+        default="laplacian",
         help="AMOR basis: pca | fixed 3D laplacian | learned Cayley on frozen laplacian span",
     )
     p.add_argument(
